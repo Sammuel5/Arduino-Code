@@ -3,7 +3,7 @@
 #include <SoftwareSerial.h>
 #include <Keyboard.h>
 #include <WiFiS3.h>
-#include <Firebase_ESP_Client.h>  // Correct Firebase Library
+#include <ArduinoHttpClient.h>
 
 // OLED Display Setup
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);
@@ -17,152 +17,188 @@ SoftwareSerial qrScanner(RX_PIN, TX_PIN);
 #define RED_LED 4    
 #define GREEN_LED 5  
 
-// Firebase Setup
+// WiFi & Firebase Setup
 #define WIFI_SSID "Shayn"
 #define WIFI_PASSWORD "123456789"
-#define FIREBASE_HOST "sammuel-17249-default-rtdb.firebaseio.com"  
-#define FIREBASE_AUTH "ft8spYCJK6juy3H0a5MT2kZd1mSmaoumehk3lC2q"  
+#define FIREBASE_HOST "sammuel-17249-default-rtdb.firebaseio.com"
+#define FIREBASE_AUTH "ZA0U4RcU8e0s838r0LL0Kcprpe3bEe7GkxuSZvqt"
 
-FirebaseData firebaseData;
-FirebaseAuth auth;
-FirebaseConfig config;
+WiFiSSLClient wifiClient;
+HttpClient httpClient(wifiClient, FIREBASE_HOST, 443);
 
 bool locked = true; 
 bool scanComplete = false; 
 
+void displayMessage(const char *message);
+void displayQRData(String data);
+void sendDataToFirebase(String qrData);
+String readQRData();
+void resetLEDs();
+void unlockPC();
+void lockPC();
+void connectToWiFi();
+
 void setup() {
-  Serial.begin(115200);
-  u8g2.begin();
+    Serial.begin(115200);
+    u8g2.begin();
 
-  pinMode(RED_LED, OUTPUT);
-  pinMode(GREEN_LED, OUTPUT);
-  digitalWrite(RED_LED, LOW);
-  digitalWrite(GREEN_LED, LOW);
+    pinMode(RED_LED, OUTPUT);
+    pinMode(GREEN_LED, OUTPUT);
+    digitalWrite(RED_LED, LOW);
+    digitalWrite(GREEN_LED, LOW);
 
-  displayMessage(F("Initializing..."));
-  delay(1500);
+    displayMessage("Initializing...");
+    delay(1500);
 
-  qrScanner.begin(9600);
-  Keyboard.begin();  
+    qrScanner.begin(9600);
+    Keyboard.begin();  
 
-  digitalWrite(RED_LED, HIGH);
-  digitalWrite(GREEN_LED, LOW);
-  displayMessage(F("System Locked"));
-  delay(1500);
-  displayMessage(F("Scan To Unlock"));
+    digitalWrite(RED_LED, HIGH);
+    displayMessage("System Locked");
+    delay(1500);
 
-  // Connect to WiFi
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
-    Serial.println(F("Connecting to WiFi..."));
-  }
-  Serial.println(F("Connected to WiFi"));
-
-  // Firebase Setup
-  config.host = FIREBASE_HOST;
-  config.signer.tokens.legacy_token = FIREBASE_AUTH;
-  Firebase.begin(&config, &auth);
-  Firebase.reconnectWiFi(true);
+    connectToWiFi();
 }
 
 void loop() {
-  if (qrScanner.available() && !scanComplete) {
-    String qrData = readQRData();
+    if (qrScanner.available() && !scanComplete) {
+        String qrData = readQRData();
 
-    if (qrData.length() > 0) {  
-      scanComplete = true;  
-      Serial.println("QR Data: " + qrData);
-      displayQRData(qrData);
-      delay(3000);  
+        if (qrData.length() == 11 && qrData.startsWith("UA") && qrData.substring(2).toInt() > 0) {  
+            scanComplete = true;  
+            Serial.println("QR Data: " + qrData);
+            displayQRData(qrData);
+            sendDataToFirebase(qrData);
 
-      sendToFirebase(qrData);
+            if (locked) {  
+                unlockPC();
+                digitalWrite(GREEN_LED, HIGH);
+                digitalWrite(RED_LED, LOW);
+                locked = false;
+                displayMessage("Scan To Lock");  
+            } else {  
+                lockPC();
+                digitalWrite(RED_LED, HIGH);
+                digitalWrite(GREEN_LED, LOW);
+                locked = true;
+                displayMessage("Scan To Unlock");  
+            }
 
-      if (locked) {  
-        displayStatus(F("UNLOCKING PC..."));
-        unlockPC();
-        digitalWrite(GREEN_LED, HIGH);
-        digitalWrite(RED_LED, LOW);
-        locked = false;
-      } else {  
-        displayStatus(F("LOCKING PC...")); 
-        lockPC();
-        digitalWrite(RED_LED, HIGH);
-        digitalWrite(GREEN_LED, LOW);
-        locked = true;
-      }
-
-      delay(1500);
-      resetLEDs();  
-      delay(3000);  
-      scanComplete = false;  
-      displayMessage(F("Scan To Lock"));
+            delay(2000);  
+            scanComplete = false;  
+        }
     }
-  }
 }
 
-void sendToFirebase(String qrData) {
-  String path = "/scanned_data";  
-  Serial.println(F("Sending to Firebase..."));
-  
-  if (Firebase.RTDB.setString(&firebaseData, path.c_str(), qrData.c_str())) {
-    Serial.println(F("Firebase: Data sent!"));
-  } else {
-    Serial.println("Firebase Error: " + firebaseData.errorReason());
-  }
+void sendDataToFirebase(String qrData) {
+    String path = "/scannedData.json?auth=" + String(FIREBASE_AUTH);
+    String jsonData = "{\"qrCode\": \"" + qrData + "\"}";
+
+    Serial.println("Sending data to Firebase...");
+    Serial.println("Host: " + String(FIREBASE_HOST));
+    Serial.println("Auth: " + String(FIREBASE_AUTH));
+    Serial.println("Data: " + jsonData);
+
+    httpClient.setTimeout(5000);
+    httpClient.beginRequest();
+    httpClient.put(path);
+    httpClient.sendHeader("Content-Type", "application/json");
+    httpClient.sendHeader("Content-Length", jsonData.length());
+    httpClient.beginBody();
+    httpClient.print(jsonData);
+    httpClient.endRequest();
+
+    int statusCode = httpClient.responseStatusCode();
+    if (statusCode == 200) {
+        Serial.println("Data sent successfully!");
+    } else {
+        Serial.print("Failed to send data. HTTP Status Code: ");
+        Serial.println(statusCode);
+    }
 }
 
-String readQRData() {
-  String data = "";
-  while (qrScanner.available()) {
-    char c = qrScanner.read();
-    data += c;
-  }
-  return data;
+void displayMessage(const char *message) {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_6x10_mr);
+    u8g2.drawStr(0, 10, message);
+    u8g2.sendBuffer();
 }
+
+void displayQRData(String data) {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_6x10_mr);
+    u8g2.drawStr(0, 10, "QR Scanned:");
+    u8g2.drawStr(0, 20, data.c_str());
+    u8g2.sendBuffer();
+}
+
+void connectToWiFi() {
+    Serial.print("Connecting to WiFi: ");
+    Serial.println(WIFI_SSID);
+    
+    // Static IP Configuration
+    IPAddress local_IP(192, 168, 1, 100); // Change if needed
+    IPAddress gateway(192, 168, 1, 1);
+    IPAddress subnet(255, 255, 255, 0);
+    WiFi.config(local_IP, gateway, subnet);
+
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+        delay(1000);
+        Serial.print(".");
+        attempts++;
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\nWiFi Connected!");
+        Serial.print("IP Address: ");
+        Serial.println(WiFi.localIP());
+        displayMessage("WiFi Connected");
+        delay(1500);  
+        displayMessage("Scan To Unlock");
+    } else {
+        Serial.println("\nWiFi Connection Failed!");
+        displayMessage("WiFi Failed!");
+    }
+}
+
 
 void unlockPC() {
-  Keyboard.press(KEY_LEFT_GUI);
-  Keyboard.press('r');
+  Serial.println(" Unlock PC...");
+  delay(500);  
+  Keyboard.press(KEY_F1);
   delay(100);
   Keyboard.releaseAll();
-  delay(400);
-  Keyboard.print(F("notepad"));
-  delay(400);
+  delay(500);
+  Keyboard.print("090503");
+  delay(500);
   Keyboard.press(KEY_RETURN);
-  Keyboard.releaseAll();
-  delay(400);
-  Keyboard.print(F("PC Unlocked!"));
-  Keyboard.press(KEY_RETURN);
+  delay(100);
   Keyboard.releaseAll();
 }
 
 void lockPC() {
-  Keyboard.press(KEY_LEFT_CTRL);
-  Keyboard.press(KEY_LEFT_GUI);
-  Keyboard.press('l');
-  delay(100);
-  Keyboard.releaseAll();
+    Serial.println("Locking PC...");
+    Keyboard.press(KEY_LEFT_GUI);
+    Keyboard.press('l');
+    delay(100);
+    Keyboard.releaseAll();
 }
 
-void displayMessage(const __FlashStringHelper *message) {
-  u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_6x10_mr);
-  u8g2.drawStr(0, 10, reinterpret_cast<const char*>(message));
-  u8g2.sendBuffer();
-}
-
-void displayQRData(String data) {
-  displayMessage(F("QR: "));
-  u8g2.drawStr(30, 20, data.c_str());
-  u8g2.sendBuffer();
-}
-
-void displayStatus(const __FlashStringHelper *status) {
-  displayMessage(status);
-}
-
-void resetLEDs() {
-  digitalWrite(RED_LED, LOW);
-  digitalWrite(GREEN_LED, LOW);
+String readQRData() {
+    String data = "";
+    unsigned long startTime = millis();
+    
+    while (millis() - startTime < 1000) {
+        while (qrScanner.available()) {
+            char c = qrScanner.read();
+            if (c == '\n') break;
+            data += c;
+            startTime = millis();
+        }
+    }
+    data.trim();
+    return data;
 }
