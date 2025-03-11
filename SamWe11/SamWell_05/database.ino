@@ -21,6 +21,10 @@ SoftwareSerial qrScanner(RX_PIN, TX_PIN);
 #define WIFI_SSID "Shayn"
 #define WIFI_PASSWORD "123456789"
 #define FIREBASE_HOST "sammuel-17249-default-rtdb.firebaseio.com"
+#define FIREBASE_AUTH "ft8spYCJK6juy3H0a5MT2kZd1mSmaoumehk3lC2q"
+
+// PC Password
+#define PC_PASSWORD "090503"
 
 WiFiClient wifiClient;
 HttpClient httpClient(wifiClient, "sammuel-17249-default-rtdb.firebaseio.com", 80);
@@ -38,6 +42,7 @@ String readQRData();
 void resetLEDs();
 void indicateError();
 void connectToWiFi();
+void unlockPC();
 
 void setup() {
     Serial.begin(115200);
@@ -90,7 +95,7 @@ void sendDataToFirebase(String qrData) {
     String jsonData = "{\"qrCode\": \"" + qrData + "\"}";
 
     httpClient.beginRequest();
-    httpClient.post(path);
+    httpClient.put(path);
     httpClient.sendHeader("Content-Type", "application/json");
     httpClient.sendHeader("Content-Length", jsonData.length());
     httpClient.beginBody();
@@ -159,6 +164,20 @@ void connectToWiFi() {
         displayMessage("WiFi Failed!");
         indicateError();
     }
+}
+
+void unlockPC() {
+    Serial.println("Unlock PC...");
+    delay(500);  
+    Keyboard.press(KEY_RETURN);
+    delay(100);
+    Keyboard.releaseAll();
+    delay(500);
+    Keyboard.print(PC_PASSWORD);
+    delay(500);
+    Keyboard.press(KEY_RETURN);
+    delay(100);
+    Keyboard.releaseAll();
 }
 
 String readQRData() {
