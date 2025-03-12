@@ -21,10 +21,9 @@ SoftwareSerial qrScanner(RX_PIN, TX_PIN);
 #define WIFI_SSID "Shayn"
 #define WIFI_PASSWORD "123456789"
 #define FIREBASE_HOST "sammuel-17249-default-rtdb.firebaseio.com"
-#define FIREBASE_AUTH "ZA0U4RcU8e0s838r0LL0Kcprpe3bEe7GkxuSZvqt"
 
 WiFiSSLClient wifiClient;
-HttpClient httpClient(wifiClient, FIREBASE_HOST, 443);
+HttpClient httpClient(wifiClient, "sammuel-17249-default-rtdb.firebaseio.com", 443);
 
 bool locked = true; 
 bool scanComplete = false; 
@@ -91,17 +90,16 @@ void loop() {
 }
 
 void sendDataToFirebase(String qrData) {
-    String path = "/scannedData.json?auth=" + String(FIREBASE_AUTH);
+    String path = "/scannedData.json";
     String jsonData = "{\"qrCode\": \"" + qrData + "\"}";
 
     Serial.println("Sending data to Firebase...");
     Serial.println("Host: " + String(FIREBASE_HOST));
-    Serial.println("Auth: " + String(FIREBASE_AUTH));
     Serial.println("Data: " + jsonData);
 
     httpClient.setTimeout(5000);
     httpClient.beginRequest();
-    httpClient.put(path);
+    httpClient.post(path);  // Change from put() to post()
     httpClient.sendHeader("Content-Type", "application/json");
     httpClient.sendHeader("Content-Length", jsonData.length());
     httpClient.beginBody();
@@ -109,11 +107,16 @@ void sendDataToFirebase(String qrData) {
     httpClient.endRequest();
 
     int statusCode = httpClient.responseStatusCode();
+    String response = httpClient.responseBody();
+
+    Serial.print("HTTP Status Code: ");
+    Serial.println(statusCode);
+    Serial.println("Firebase Response: " + response);
+
     if (statusCode == 200) {
-        Serial.println("Data sent successfully!");
+        Serial.println("✅ Data sent successfully!");
     } else {
-        Serial.print("Failed to send data. HTTP Status Code: ");
-        Serial.println(statusCode);
+        Serial.println("❌ Failed to send data!");
     }
 }
 
@@ -136,12 +139,6 @@ void connectToWiFi() {
     Serial.print("Connecting to WiFi: ");
     Serial.println(WIFI_SSID);
     
-    // Static IP Configuration
-    IPAddress local_IP(192, 168, 1, 100); // Change if needed
-    IPAddress gateway(192, 168, 1, 1);
-    IPAddress subnet(255, 255, 255, 0);
-    WiFi.config(local_IP, gateway, subnet);
-
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     
     int attempts = 0;
@@ -151,32 +148,35 @@ void connectToWiFi() {
         attempts++;
     }
 
+    Serial.println();
+    Serial.print("WiFi Status: ");
+    Serial.println(WiFi.status());
+
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("\nWiFi Connected!");
+        Serial.println("\n✅ WiFi Connected!");
         Serial.print("IP Address: ");
         Serial.println(WiFi.localIP());
         displayMessage("WiFi Connected");
         delay(1500);  
         displayMessage("Scan To Unlock");
     } else {
-        Serial.println("\nWiFi Connection Failed!");
+        Serial.println("\n❌ WiFi Connection Failed!");
         displayMessage("WiFi Failed!");
     }
 }
 
-
 void unlockPC() {
-  Serial.println(" Unlock PC...");
-  delay(500);  
-  Keyboard.press(KEY_F1);
-  delay(100);
-  Keyboard.releaseAll();
-  delay(500);
-  Keyboard.print("090503");
-  delay(500);
-  Keyboard.press(KEY_RETURN);
-  delay(100);
-  Keyboard.releaseAll();
+    Serial.println(" Unlock PC...");
+    delay(500);  
+    Keyboard.press(KEY_F1);
+    delay(100);
+    Keyboard.releaseAll();
+    delay(500);
+    Keyboard.print("090503");
+    delay(500);
+    Keyboard.press(KEY_RETURN);
+    delay(100);
+    Keyboard.releaseAll();
 }
 
 void lockPC() {
