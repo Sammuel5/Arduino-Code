@@ -4,6 +4,7 @@
 #include <Keyboard.h>
 #include <WiFiS3.h>
 #include <ArduinoHttpClient.h>
+#include <TimeLib.h>  // Time library instead of RTC
 
 // OLED Display Setup
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);
@@ -25,17 +26,33 @@ SoftwareSerial qrScanner(RX_PIN, TX_PIN);
 WiFiSSLClient wifiClient;
 HttpClient httpClient(wifiClient, "sammuel-17249-default-rtdb.firebaseio.com", 443);
 
+// Month names array for formatting
+const char* monthNames[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
 bool locked = true; 
 bool scanComplete = false; 
 
+// Initial time setup - set this to your current date and time
+// Format: year, month, day, hour, minute, second
+// Example: March 13, 2025, 15:30:00
+#define INITIAL_YEAR 2025
+#define INITIAL_MONTH 3
+#define INITIAL_DAY 13
+#define INITIAL_HOUR 23
+#define INITIAL_MINUTE 32
+#define INITIAL_SECOND 0
+
 void displayMessage(const char *message);
 void displayQRData(String data);
-void sendDataToFirebase(String qrData);
+void sendDataToFirebase(String qrData, bool isTimeIn);
 String readQRData();
 void resetLEDs();
 void unlockPC();
 void lockPC();
 void connectToWiFi();
+String getFormattedDate();
+String getFormattedTime();
+void setupTime();
 
 void setup() {
     Serial.begin(115200);
@@ -52,11 +69,21 @@ void setup() {
     qrScanner.begin(9600);
     Keyboard.begin();  
 
+    // Setup internal time
+    setupTime();
+    Serial.println("Time system initialized");
+
     digitalWrite(RED_LED, HIGH);
     displayMessage("System Locked");
     delay(1500);
 
     connectToWiFi();
+}
+
+void setupTime() {
+    // Set the time to the values defined in the initial constants
+    setTime(INITIAL_HOUR, INITIAL_MINUTE, INITIAL_SECOND, INITIAL_DAY, INITIAL_MONTH, INITIAL_YEAR);
+    Serial.println("Time set to: " + getFormattedDate() + " " + getFormattedTime());
 }
 
 void loop() {
@@ -67,15 +94,20 @@ void loop() {
             scanComplete = true;  
             Serial.println("QR Data: " + qrData);
             displayQRData(qrData);
-            sendDataToFirebase(qrData);
-
+            
             if (locked) {  
+                // This is a time-in scan
+                sendDataToFirebase(qrData, true);
+                
                 unlockPC();
                 digitalWrite(GREEN_LED, HIGH);
                 digitalWrite(RED_LED, LOW);
                 locked = false;
                 displayMessage("Scan To Lock");  
             } else {  
+                // This is a time-out scan
+                sendDataToFirebase(qrData, false);
+                
                 lockPC();
                 digitalWrite(RED_LED, HIGH);
                 digitalWrite(GREEN_LED, LOW);
@@ -89,9 +121,44 @@ void loop() {
     }
 }
 
-void sendDataToFirebase(String qrData) {
+String getFormattedDate() {
+    // Format date as "Mmm dd yyyy" (e.g., "Mar 14 2025")
+    char dateBuffer[12];
+    sprintf(dateBuffer, "%s %02d %04d", 
+            monthNames[month() - 1], day(), year());
+    return String(dateBuffer);
+}
+
+String getFormattedTime() {
+    // Format time as "hh:mm:ss" (e.g., "14:30:45")
+    char timeBuffer[9];
+    sprintf(timeBuffer, "%02d:%02d:%02d", 
+            hour(), minute(), second());
+    return String(timeBuffer);
+}
+
+void sendDataToFirebase(String qrData, bool isTimeIn) {
+    // Get current date and time at the moment of scanning
+    String formattedDate = getFormattedDate();
+    String formattedTime = getFormattedTime();
+    
+    // Create a path for the QR code
     String path = "/scannedData.json";
-    String jsonData = "{\"qrCode\": \"" + qrData + "\"}";
+    String jsonData;
+    
+    if (isTimeIn) {
+        // Time-in record
+        jsonData = "{\"qrCode\": \"" + qrData + "\", "
+                + "\"date\": \"" + formattedDate + "\", "
+                + "\"timeIn\": \"" + formattedTime + "\", "
+                + "\"status\": \"in\"}";
+    } else {
+        // Time-out record
+        jsonData = "{\"qrCode\": \"" + qrData + "\", "
+                + "\"date\": \"" + formattedDate + "\", "
+                + "\"timeOut\": \"" + formattedTime + "\", "
+                + "\"status\": \"out\"}";
+    }
 
     Serial.println("Sending data to Firebase...");
     Serial.println("Host: " + String(FIREBASE_HOST));
@@ -99,7 +166,7 @@ void sendDataToFirebase(String qrData) {
 
     httpClient.setTimeout(5000);
     httpClient.beginRequest();
-    httpClient.post(path);  // Change from put() to post()
+    httpClient.post(path);
     httpClient.sendHeader("Content-Type", "application/json");
     httpClient.sendHeader("Content-Length", jsonData.length());
     httpClient.beginBody();
@@ -115,6 +182,16 @@ void sendDataToFirebase(String qrData) {
 
     if (statusCode == 200) {
         Serial.println("✅ Data sent successfully!");
+        
+        // Display time info on OLED
+        u8g2.clearBuffer();
+        u8g2.setFont(u8g2_font_6x10_mr);
+        u8g2.drawStr(0, 10, "QR Scanned:");
+        u8g2.drawStr(0, 20, qrData.c_str());
+        u8g2.drawStr(0, 30, isTimeIn ? "Time IN:" : "Time OUT:");
+        u8g2.drawStr(0, 40, formattedTime.c_str());
+        u8g2.drawStr(0, 50, formattedDate.c_str());
+        u8g2.sendBuffer();
     } else {
         Serial.println("❌ Failed to send data!");
     }
