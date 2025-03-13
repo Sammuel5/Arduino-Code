@@ -4,7 +4,9 @@
 #include <Keyboard.h>
 #include <WiFiS3.h>
 #include <ArduinoHttpClient.h>
-#include <TimeLib.h>  // Time library instead of RTC
+#include <TimeLib.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
 
 // OLED Display Setup
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);
@@ -26,20 +28,26 @@ SoftwareSerial qrScanner(RX_PIN, TX_PIN);
 WiFiSSLClient wifiClient;
 HttpClient httpClient(wifiClient, "sammuel-17249-default-rtdb.firebaseio.com", 443);
 
+// NTP Client Setup
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org");
+#define GMT_OFFSET_SEC 8 * 3600  // Change this to your timezone offset in seconds (e.g., GMT+8 = 8*3600)
+#define NTP_UPDATE_INTERVAL_MS 60000  // Update time every minute
+
 // Month names array for formatting
 const char* monthNames[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
 bool locked = true; 
-bool scanComplete = false; 
+bool scanComplete = false;
+unsigned long lastNtpUpdate = 0;
 
-// Initial time setup - set this to your current date and time
+// Initial time setup as fallback
 // Format: year, month, day, hour, minute, second
-// Example: March 13, 2025, 15:30:00
 #define INITIAL_YEAR 2025
 #define INITIAL_MONTH 3
 #define INITIAL_DAY 13
-#define INITIAL_HOUR 23
-#define INITIAL_MINUTE 32
+#define INITIAL_HOUR 3
+#define INITIAL_MINUTE 11
 #define INITIAL_SECOND 0
 
 void displayMessage(const char *message);
@@ -53,6 +61,7 @@ void connectToWiFi();
 String getFormattedDate();
 String getFormattedTime();
 void setupTime();
+void updateTimeFromNTP();
 
 void setup() {
     Serial.begin(115200);
@@ -69,24 +78,60 @@ void setup() {
     qrScanner.begin(9600);
     Keyboard.begin();  
 
-    // Setup internal time
+    // Use initial time as fallback
     setupTime();
-    Serial.println("Time system initialized");
+    Serial.println("Initial time set to: " + getFormattedDate() + " " + getFormattedTime());
 
     digitalWrite(RED_LED, HIGH);
     displayMessage("System Locked");
     delay(1500);
 
     connectToWiFi();
+    
+    // Initialize and update NTP client after WiFi is connected
+    if (WiFi.status() == WL_CONNECTED) {
+        timeClient.begin();
+        timeClient.setTimeOffset(GMT_OFFSET_SEC);
+        updateTimeFromNTP();
+    }
 }
 
 void setupTime() {
-    // Set the time to the values defined in the initial constants
+    // Set the time to the values defined in the initial constants as fallback
     setTime(INITIAL_HOUR, INITIAL_MINUTE, INITIAL_SECOND, INITIAL_DAY, INITIAL_MONTH, INITIAL_YEAR);
-    Serial.println("Time set to: " + getFormattedDate() + " " + getFormattedTime());
+}
+
+void updateTimeFromNTP() {
+    Serial.println("Updating time from NTP server...");
+    displayMessage("Syncing time...");
+    
+    if (timeClient.update()) {
+        // Get full date and time from NTP
+        unsigned long epochTime = timeClient.getEpochTime();
+        
+        // Convert to time_t and sync with TimeLib
+        setTime(epochTime);
+        
+        Serial.println("✅ NTP time sync successful!");
+        Serial.println("Current time: " + getFormattedDate() + " " + getFormattedTime());
+        displayMessage("Time synced!");
+        delay(1000);
+        displayMessage(locked ? "Scan To Unlock" : "Scan To Lock");
+        lastNtpUpdate = millis();
+    } else {
+        Serial.println("❌ NTP time sync failed!");
+        displayMessage("Time sync failed");
+        delay(1000);
+        displayMessage(locked ? "Scan To Unlock" : "Scan To Lock");
+    }
 }
 
 void loop() {
+    // Check if it's time to update from NTP
+    if (WiFi.status() == WL_CONNECTED && (millis() - lastNtpUpdate > NTP_UPDATE_INTERVAL_MS)) {
+        updateTimeFromNTP();
+    }
+    
     if (qrScanner.available() && !scanComplete) {
         String qrData = readQRData();
 
@@ -124,7 +169,7 @@ void loop() {
 String getFormattedDate() {
     // Format date as "Mmm dd yyyy" (e.g., "Mar 14 2025")
     char dateBuffer[12];
-    sprintf(dateBuffer, "%s %02d %04d", 
+    sprintf(dateBuffer, "%s %d %04d", 
             monthNames[month() - 1], day(), year());
     return String(dateBuffer);
 }
@@ -219,27 +264,32 @@ void connectToWiFi() {
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     
     int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    while (attempts < 30) {  // Increased timeout
         delay(1000);
         Serial.print(".");
+        
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.println("\n✅ WiFi Connected!");
+            Serial.print("IP Address: ");
+            Serial.println(WiFi.localIP());
+            
+            // Check if IP is valid
+            if (WiFi.localIP()[0] != 0) {
+                displayMessage("WiFi Connected");
+                delay(1500);
+                displayMessage("Scan To Unlock");
+                return;
+            } else {
+                Serial.println("Invalid IP address. Waiting for valid IP...");
+            }
+        }
         attempts++;
     }
-
-    Serial.println();
+    
+    Serial.println("\n❌ WiFi Connection Failed!");
     Serial.print("WiFi Status: ");
     Serial.println(WiFi.status());
-
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("\n✅ WiFi Connected!");
-        Serial.print("IP Address: ");
-        Serial.println(WiFi.localIP());
-        displayMessage("WiFi Connected");
-        delay(1500);  
-        displayMessage("Scan To Unlock");
-    } else {
-        Serial.println("\n❌ WiFi Connection Failed!");
-        displayMessage("WiFi Failed!");
-    }
+    displayMessage("WiFi Failed!");
 }
 
 void unlockPC() {
