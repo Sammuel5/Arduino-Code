@@ -175,10 +175,15 @@ String getFormattedDate() {
 }
 
 String getFormattedTime() {
-    // Format time as "hh:mm:ss" (e.g., "14:30:45")
-    char timeBuffer[9];
-    sprintf(timeBuffer, "%02d:%02d:%02d", 
-            hour(), minute(), second());
+    // Format time as "hh:mm:ss AM/PM" (e.g., "02:30:45 PM")
+    char timeBuffer[12];
+    int h = hour();
+    const char* ampm = h >= 12 ? "PM" : "AM";
+    h = h > 12 ? h - 12 : h;
+    h = h == 0 ? 12 : h;  // Handle midnight (0 hour) as 12 AM
+    
+    sprintf(timeBuffer, "%02d:%02d:%02d %s", 
+            h, minute(), second(), ampm);
     return String(timeBuffer);
 }
 
@@ -187,31 +192,39 @@ void sendDataToFirebase(String qrData, bool isTimeIn) {
     String formattedDate = getFormattedDate();
     String formattedTime = getFormattedTime();
     
-    // Create a path for the QR code
-    String path = "/scannedData.json";
-    String jsonData;
+    // Create a path using the QR code as a key
+    // This will create a structure like /scannedData/UA202201146/sessions/timestamp/...
+    String sanitizedDate = formattedDate;
+    sanitizedDate.replace(" ", "_");  // Replace spaces with underscores
     
+    // Generate a timestamp-based ID for this scan session
+    // Fix for the String(now()) ambiguity - explicitly cast to unsigned long first
+    unsigned long epochTime = (unsigned long)now();  
+    String timestamp = String(epochTime);
+    
+    // Create the path - organizing by QR code, then by session timestamp
+    String path = "/scannedData/" + qrData + "/sessions/" + timestamp + ".json";
+    
+    String jsonData;
     if (isTimeIn) {
-        // Time-in record
-        jsonData = "{\"qrCode\": \"" + qrData + "\", "
-                + "\"date\": \"" + formattedDate + "\", "
-                + "\"timeIn\": \"" + formattedTime + "\", "
+        // Time-in record - Fix string concatenation
+        jsonData = "{\"date\": \"" + formattedDate + "\", "
+                + "\"time\": \"" + formattedTime + "\", "
                 + "\"status\": \"in\"}";
     } else {
-        // Time-out record
-        jsonData = "{\"qrCode\": \"" + qrData + "\", "
-                + "\"date\": \"" + formattedDate + "\", "
-                + "\"timeOut\": \"" + formattedTime + "\", "
+        // Time-out record - Fix string concatenation
+        jsonData = "{\"date\": \"" + formattedDate + "\", "
+                + "\"time\": \"" + formattedTime + "\", "
                 + "\"status\": \"out\"}";
     }
 
     Serial.println("Sending data to Firebase...");
-    Serial.println("Host: " + String(FIREBASE_HOST));
+    Serial.println("Path: " + path);
     Serial.println("Data: " + jsonData);
 
     httpClient.setTimeout(5000);
     httpClient.beginRequest();
-    httpClient.post(path);
+    httpClient.put(path);  // Using PUT instead of POST to set data at a specific path
     httpClient.sendHeader("Content-Type", "application/json");
     httpClient.sendHeader("Content-Length", jsonData.length());
     httpClient.beginBody();
@@ -221,7 +234,7 @@ void sendDataToFirebase(String qrData, bool isTimeIn) {
     int statusCode = httpClient.responseStatusCode();
     String response = httpClient.responseBody();
 
-    Serial.print("HTTP Status Code: ");
+    Serial.print("HTTP Status code: ");
     Serial.println(statusCode);
     Serial.println("Firebase Response: " + response);
 
