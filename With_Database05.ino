@@ -7,9 +7,15 @@
 #include <TimeLib.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
+#include <LiquidCrystal_I2C.h>  // Added LiquidCrystal I2C Library
 
 // OLED Display Setup
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);
+
+// LCD I2C Setup
+// Set the LCD address to 0x27 for a 16 chars and 2 line display
+// If 0x27 doesn't work, try 0x3F
+LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 // QR Scanner Serial Setup
 #define RX_PIN 2  
@@ -21,7 +27,7 @@ SoftwareSerial qrScanner(RX_PIN, TX_PIN);
 #define GREEN_LED 5  
 
 // WiFi & Firebase Setup
-#define WIFI_SSID "Shayn"
+#define WIFI_SSID "Sam"
 #define WIFI_PASSWORD "123456789"
 #define FIREBASE_HOST "sammuel-17249-default-rtdb.firebaseio.com"
 
@@ -39,7 +45,10 @@ const char* monthNames[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Au
 
 bool locked = true; 
 bool scanComplete = false;
+bool firstScanDone = false;  // New flag to track if first scan is done
+String lastQRData = "";      // Store the QR data from first scan
 unsigned long lastNtpUpdate = 0;
+unsigned long firstScanTime = 0;  // Time when first scan was completed
 
 // Initial time setup as fallback
 // Format: year, month, day, hour, minute, second
@@ -62,11 +71,21 @@ String getFormattedDate();
 String getFormattedTime();
 void setupTime();
 void updateTimeFromNTP();
+void updateLCDMessage(const char *line1, const char *line2);
 
 void setup() {
     Serial.begin(115200);
+    
+    // Initialize LCD first thing
+    lcd.init();
+    lcd.backlight();
+    updateLCDMessage("AUTHENTIKEY", "SYSTEM");
+    
+    // Add a longer delay for welcome message to be visible
+    delay(3000);
+    
+    // Initialize other components
     u8g2.begin();
-
     pinMode(RED_LED, OUTPUT);
     pinMode(GREEN_LED, OUTPUT);
     digitalWrite(RED_LED, LOW);
@@ -75,8 +94,10 @@ void setup() {
     displayMessage("Initializing...");
     delay(1500);
 
+    // Initialize scanner with debug message
     qrScanner.begin(9600);
-    Keyboard.begin();  
+    Serial.println("QR Scanner initialized on pins RX:" + String(RX_PIN) + " TX:" + String(TX_PIN));
+    Keyboard.begin();
 
     // Use initial time as fallback
     setupTime();
@@ -116,13 +137,32 @@ void updateTimeFromNTP() {
         Serial.println("Current time: " + getFormattedDate() + " " + getFormattedTime());
         displayMessage("Time synced!");
         delay(1000);
-        displayMessage(locked ? "Scan To Unlock" : "Scan To Lock");
+        
+        if (locked) {
+            if (!firstScanDone) {
+                displayMessage("Scan for Time-In");
+            } else {
+                displayMessage("Scan again to Unlock");
+            }
+        } else {
+            displayMessage("Scan To Lock");
+        }
+        
         lastNtpUpdate = millis();
     } else {
         Serial.println("❌ NTP time sync failed!");
         displayMessage("Time sync failed");
         delay(1000);
-        displayMessage(locked ? "Scan To Unlock" : "Scan To Lock");
+        
+        if (locked) {
+            if (!firstScanDone) {
+                displayMessage("Scan for Time-In");
+            } else {
+                displayMessage("Scan again to Unlock");
+            }
+        } else {
+            displayMessage("Scan To Lock");
+        }
     }
 }
 
@@ -132,37 +172,94 @@ void loop() {
         updateTimeFromNTP();
     }
     
+    // Add debug for scanner availability
+    if (qrScanner.available()) {
+        Serial.println("QR Scanner has data available");
+    }
+    
     if (qrScanner.available() && !scanComplete) {
         String qrData = readQRData();
-
+        
+        Serial.println("QR Data received: " + qrData);
+        Serial.println("QR Data length: " + String(qrData.length()));
+        
+        // Check if QR data is valid
         if (qrData.length() == 11 && qrData.startsWith("UA") && qrData.substring(2).toInt() > 0) {  
             scanComplete = true;  
-            Serial.println("QR Data: " + qrData);
+            Serial.println("Valid QR Data: " + qrData);
             displayQRData(qrData);
             
-            if (locked) {  
-                // This is a time-in scan
-                sendDataToFirebase(qrData, true);
-                
-                unlockPC();
-                digitalWrite(GREEN_LED, HIGH);
-                digitalWrite(RED_LED, LOW);
-                locked = false;
-                displayMessage("Scan To Lock");  
+            if (locked) {
+                if (!firstScanDone) {
+                    // This is the first scan - just log time-in
+                    sendDataToFirebase(qrData, true);
+                    lastQRData = qrData;  // Store QR data for verification on second scan
+                    firstScanDone = true;
+                    firstScanTime = millis();
+                    
+                    digitalWrite(GREEN_LED, LOW);  // Keep red LED on
+                    digitalWrite(RED_LED, HIGH);
+                    
+                    displayMessage("Scan again to Unlock");
+                } else {
+                    // This is the second scan - verify and unlock
+                    if (qrData == lastQRData) {
+                        // Same QR code - proceed with unlock
+                        unlockPC();
+                        digitalWrite(GREEN_LED, HIGH);
+                        digitalWrite(RED_LED, LOW);
+                        locked = false;
+                        firstScanDone = false;  // Reset scan state
+                        displayMessage("System Unlocked");
+                        delay(1000);
+                        displayMessage("Scan To Lock");
+                    } else {
+                        // Different QR code - reject
+                        displayMessage("QR Code Mismatch!");
+                        delay(2000);
+                        displayMessage("Scan again to Unlock");
+                    }
+                }
             } else {  
-                // This is a time-out scan
+                // This is a time-out scan - lock the system
                 sendDataToFirebase(qrData, false);
                 
                 lockPC();
                 digitalWrite(RED_LED, HIGH);
                 digitalWrite(GREEN_LED, LOW);
                 locked = true;
-                displayMessage("Scan To Unlock");  
+                firstScanDone = false;  // Reset scan state for next unlock sequence
+                displayMessage("System Locked");
+                delay(1000);
+                displayMessage("Scan for Time-In");
             }
 
             delay(2000);  
             scanComplete = false;  
+        } else if (qrData.length() > 0) {
+            // We got data but it doesn't match our format
+            Serial.println("Invalid QR format: " + qrData);
+            displayMessage("Invalid QR code");
+            delay(2000);
+            
+            if (locked) {
+                if (!firstScanDone) {
+                    displayMessage("Scan for Time-In");
+                } else {
+                    displayMessage("Scan again to Unlock");
+                }
+            } else {
+                displayMessage("Scan To Lock");
+            }
         }
+    }
+    
+    // Check if first scan has timed out (after 30 seconds)
+    if (firstScanDone && (millis() - firstScanTime > 30000)) {
+        firstScanDone = false;
+        displayMessage("Scan timeout");
+        delay(1000);
+        displayMessage("Scan for Time-In");
     }
 }
 
@@ -252,6 +349,8 @@ void sendDataToFirebase(String qrData, bool isTimeIn) {
         u8g2.sendBuffer();
     } else {
         Serial.println("❌ Failed to send data!");
+        displayMessage("Firebase Error");
+        delay(1000);
     }
 }
 
@@ -290,7 +389,7 @@ void connectToWiFi() {
             if (WiFi.localIP()[0] != 0) {
                 displayMessage("WiFi Connected");
                 delay(1500);
-                displayMessage("Scan To Unlock");
+                displayMessage("Scan for Time-In");
                 return;
             } else {
                 Serial.println("Invalid IP address. Waiting for valid IP...");
@@ -306,13 +405,14 @@ void connectToWiFi() {
 }
 
 void unlockPC() {
-    Serial.println(" Unlock PC...");
+    Serial.println("Unlocking PC...");
+    displayMessage("Unlocking PC...");
     delay(500);  
     Keyboard.press(KEY_F1);
     delay(100);
     Keyboard.releaseAll();
     delay(500);
-    Keyboard.print("090503");
+    Keyboard.print("hannipham");
     delay(500);
     Keyboard.press(KEY_RETURN);
     delay(100);
@@ -321,6 +421,7 @@ void unlockPC() {
 
 void lockPC() {
     Serial.println("Locking PC...");
+    displayMessage("Locking PC...");
     Keyboard.press(KEY_LEFT_GUI);
     Keyboard.press('l');
     delay(100);
@@ -331,14 +432,32 @@ String readQRData() {
     String data = "";
     unsigned long startTime = millis();
     
-    while (millis() - startTime < 1000) {
-        while (qrScanner.available()) {
+    // Increase timeout to 3 seconds (was 1 second)
+    while (millis() - startTime < 3000) {
+        if (qrScanner.available()) {
             char c = qrScanner.read();
+            // Debug what's being received
+            Serial.print("Scanner received char: ");
+            Serial.print(c);
+            Serial.print(" (hex: ");
+            Serial.print(c, HEX);
+            Serial.println(")");
+            
             if (c == '\n') break;
             data += c;
-            startTime = millis();
+            startTime = millis(); // Reset timeout when we receive data
         }
     }
     data.trim();
+    Serial.println("QR Data read complete: " + data);
     return data;
+}
+
+// Function to update LCD display - keep this function for initial setup only
+void updateLCDMessage(const char *line1, const char *line2) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(line1);
+    lcd.setCursor(0, 1);
+    lcd.print(line2);
 }
