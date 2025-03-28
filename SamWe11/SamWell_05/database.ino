@@ -73,6 +73,8 @@ String getFormattedTime();
 void setupTime();
 void updateTimeFromNTP();
 void updateLCDMessage(const char *line1, const char *line2);
+void unlockPC();  // Function to unlock the PC
+void lockPC();    // Function to lock the PC
 
 void setup() {
     Serial.begin(115200);
@@ -189,6 +191,33 @@ void loop() {
             relayStartTime = millis();       // Record the time when relay is activated
             relayActive = true;              // Set relay active flag
 
+            // Check if the system is locked or unlocked
+            if (locked) {
+                // This is the first scan - unlock the system
+                lastQRData = qrData;  // Store QR data for verification on second scan
+                unlockPC();           // Call the unlock function
+                locked = false;       // Unlock the system
+                displayMessage("System Unlocked");
+                delay(1000);
+                displayMessage("Scan To Lock");
+            } else {
+                // This is the second scan - lock the system
+                if (qrData == lastQRData) {
+                    // Same QR code - proceed with lock
+                    digitalWrite(RELAY_PIN, LOW);  // Turn off the relay
+                    lockPC();                      // Call the lock function
+                    locked = true;                 // Lock the system
+                    displayMessage("System Locked");
+                    delay(1000);
+                    displayMessage("Scan for Time-In");
+                } else {
+                    // Different QR code - reject
+                    displayMessage("QR Code Mismatch!");
+                    delay(2000);
+                    displayMessage("Scan again to Unlock");
+                }
+            }
+
             // Send data to Firebase (if needed)
             sendDataToFirebase(qrData, true); // Assuming this is a time-in scan
 
@@ -208,7 +237,6 @@ void loop() {
         if (millis() - relayStartTime >= 10000) {
             digitalWrite(RELAY_PIN, LOW);  // Turn off the relay
             relayActive = false;            // Reset relay active flag
-            scanComplete = false;           // Allow for new scans
         }
     }
 }
@@ -350,6 +378,30 @@ void connectToWiFi() {
     Serial.print("WiFi Status: ");
     Serial.println(WiFi.status());
     displayMessage("WiFi Failed!");
+}
+
+void unlockPC() {
+    Serial.println("Unlocking PC...");
+    displayMessage("Unlocking PC...");
+    delay(500);  
+    Keyboard.press(KEY_F1);
+    delay(100);
+    Keyboard.releaseAll();
+    delay(500);
+    Keyboard.print("hannipham");
+    delay(500);
+    Keyboard.press(KEY_RETURN);
+    delay(100);
+    Keyboard.releaseAll();
+}
+
+void lockPC() {
+    Serial.println("Locking PC...");
+    displayMessage("Locking PC...");
+    Keyboard.press(KEY_LEFT_GUI);
+    Keyboard.press('l');
+    delay(100);
+    Keyboard.releaseAll();
 }
 
 String readQRData() {
