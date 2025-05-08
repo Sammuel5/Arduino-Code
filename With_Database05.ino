@@ -13,8 +13,6 @@
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);
 
 // LCD I2C Setup
-// Set the LCD address to 0x27 for a 16 chars and 2 line display
-// If 0x27 doesn't work, try 0x3F
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 // QR Scanner Serial Setup
@@ -26,32 +24,65 @@ SoftwareSerial qrScanner(RX_PIN, TX_PIN);
 #define RED_LED 4    
 #define GREEN_LED 5  
 
-// WiFi & Firebase Setup
+// Button Pins - UPDATED WITH NEW BUTTONS
+#define LEFT_BUTTON 6   // Left button for decreasing PC lab number
+#define RIGHT_BUTTON 7  // Right button for increasing PC lab number
+#define UP_BUTTON 8     // Button for increasing PC number
+#define DOWN_BUTTON 9   // Button for decreasing PC number
+
+// WiFi Setup
 #define WIFI_SSID "Sam"
 #define WIFI_PASSWORD "123456789"
-#define FIREBASE_HOST "sammuel-17249-default-rtdb.firebaseio.com"
+
+// API Endpoint
+#define API_HOST "authentikey-1.onrender.com"
+#define API_PATH "/firebase/push-log"
+#define API_PORT 443
 
 WiFiSSLClient wifiClient;
-HttpClient httpClient(wifiClient, "sammuel-17249-default-rtdb.firebaseio.com", 443);
+HttpClient httpClient(wifiClient, API_HOST, API_PORT);
 
 // NTP Client Setup
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org");
 #define GMT_OFFSET_SEC 8 * 3600  // Change this to your timezone offset in seconds (e.g., GMT+8 = 8*3600)
 #define NTP_UPDATE_INTERVAL_MS 60000  // Update time every minute
+#define NTP_TIMEOUT 10000  // 10 second timeout for NTP requests
+
+// Array of NTP servers for fallback
+const char* ntpServers[] = {"pool.ntp.org", "time.nist.gov", "time.google.com", "asia.pool.ntp.org"};
+const int ntpServerCount = 4;  // Number of servers in the array
 
 // Month names array for formatting
 const char* monthNames[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
 bool locked = true; 
 bool scanComplete = false;
-bool firstScanDone = false;  // New flag to track if first scan is done
+bool firstScanDone = false;  // Flag to track if first scan is done
 String lastQRData = "";      // Store the QR data from first scan
+String timeInValue = "";     // Store the time-in value
+String dateValue = "";       // Store the date value
 unsigned long lastNtpUpdate = 0;
 unsigned long firstScanTime = 0;  // Time when first scan was completed
+int currentNtpServer = 0;  // Index of current NTP server
+
+// PC Lab Configuration - UPDATED
+int pcNumber = 1;      // Default PC number
+int pcLabNumber = 1;   // Default lab number
+const int MIN_PC = 1;  // Minimum PC number
+const int MAX_PC = 60; // Maximum PC number - adjust this as needed
+const int MIN_LAB = 1; // Minimum lab number
+const int MAX_LAB = 3; // Maximum lab number - adjust this as needed
+
+// Button state tracking - UPDATED
+bool leftButtonPressed = false;
+bool rightButtonPressed = false;
+bool upButtonPressed = false;
+bool downButtonPressed = false;
+unsigned long lastButtonPressTime = 0;
+#define BUTTON_DEBOUNCE_DELAY 300 // Debounce delay in milliseconds
 
 // Initial time setup as fallback
-// Format: year, month, day, hour, minute, second
 #define INITIAL_YEAR 2025
 #define INITIAL_MONTH 3
 #define INITIAL_DAY 13
@@ -61,17 +92,19 @@ unsigned long firstScanTime = 0;  // Time when first scan was completed
 
 void displayMessage(const char *message);
 void displayQRData(String data);
-void sendDataToFirebase(String qrData, bool isTimeIn);
+void sendLogToAPI(String qrData, String timeIn, String timeOut, String date);
 String readQRData();
-void resetLEDs();
-void unlockPC();
-void lockPC();
 void connectToWiFi();
 String getFormattedDate();
 String getFormattedTime();
+String getFormattedISODate(); // New ISO date format function
 void setupTime();
 void updateTimeFromNTP();
 void updateLCDMessage(const char *line1, const char *line2);
+void unlockPC();  // Function to unlock the PC
+void lockPC();    // Function to lock the PC
+void checkButtons(); // New function for checking button presses
+void displayLabConfig(); // New function to display lab configuration
 
 void setup() {
     Serial.begin(115200);
@@ -79,8 +112,15 @@ void setup() {
     // Initialize LCD first thing
     lcd.init();
     lcd.backlight();
-    updateLCDMessage("AUTHENTIKEY", "SYSTEM");
-    
+  
+    lcd.clear();
+  
+    lcd.setCursor(2, 0); // Center "Authentikey" on top
+    lcd.print("Authentikey");
+
+    lcd.setCursor(5, 1); // Center "System" on bottom
+    lcd.print("System");
+
     // Add a longer delay for welcome message to be visible
     delay(3000);
     
@@ -90,6 +130,12 @@ void setup() {
     pinMode(GREEN_LED, OUTPUT);
     digitalWrite(RED_LED, LOW);
     digitalWrite(GREEN_LED, LOW);
+    
+    // Set up button pins - UPDATED
+    pinMode(LEFT_BUTTON, INPUT_PULLUP);  // Use pull-up resistors
+    pinMode(RIGHT_BUTTON, INPUT_PULLUP);
+    pinMode(UP_BUTTON, INPUT_PULLUP);    // New button for increasing PC number
+    pinMode(DOWN_BUTTON, INPUT_PULLUP);  // New button for decreasing PC number
 
     displayMessage("Initializing...");
     delay(1500);
@@ -104,6 +150,11 @@ void setup() {
     Serial.println("Initial time set to: " + getFormattedDate() + " " + getFormattedTime());
 
     digitalWrite(RED_LED, HIGH);
+    
+    // Show initial lab configuration
+    displayLabConfig();
+    delay(2000);
+    
     displayMessage("System Locked");
     delay(1500);
 
@@ -113,6 +164,8 @@ void setup() {
     if (WiFi.status() == WL_CONNECTED) {
         timeClient.begin();
         timeClient.setTimeOffset(GMT_OFFSET_SEC);
+        // Increase update interval
+        timeClient.setUpdateInterval(NTP_TIMEOUT);
         updateTimeFromNTP();
     }
 }
@@ -126,7 +179,52 @@ void updateTimeFromNTP() {
     Serial.println("Updating time from NTP server...");
     displayMessage("Syncing time...");
     
-    if (timeClient.update()) {
+    // Check WiFi signal strength
+    Serial.print("WiFi signal strength (RSSI): ");
+    Serial.print(WiFi.RSSI());
+    Serial.println(" dBm");
+    
+    if (WiFi.RSSI() < -80) {
+        Serial.println("⚠️ Warning: WiFi signal is weak, may affect NTP sync");
+    }
+    
+    bool ntpSuccess = false;
+    
+    // Try primary NTP server first
+    Serial.print("Trying NTP server: ");
+    Serial.println(ntpServers[currentNtpServer]);
+    timeClient.setPoolServerName(ntpServers[currentNtpServer]);
+    
+    // Attempt update with current server
+    bool result = timeClient.update();
+    Serial.print("NTP update result: ");
+    Serial.println(result ? "Success" : "Failure");
+    
+    if (result) {
+        ntpSuccess = true;
+    } else {
+        // Try all fallback servers
+        for (int i = 0; i < ntpServerCount; i++) {
+            // Skip the one we just tried
+            if (i == currentNtpServer) continue;
+            
+            Serial.print("Trying fallback NTP server: ");
+            Serial.println(ntpServers[i]);
+            timeClient.setPoolServerName(ntpServers[i]);
+            
+            result = timeClient.update();
+            Serial.print("NTP update result: ");
+            Serial.println(result ? "Success" : "Failure");
+            
+            if (result) {
+                currentNtpServer = i;  // Remember which server worked
+                ntpSuccess = true;
+                break;
+            }
+        }
+    }
+    
+    if (ntpSuccess) {
         // Get full date and time from NTP
         unsigned long epochTime = timeClient.getEpochTime();
         
@@ -134,32 +232,31 @@ void updateTimeFromNTP() {
         setTime(epochTime);
         
         Serial.println("✅ NTP time sync successful!");
+        Serial.print("Using NTP server: ");
+        Serial.println(ntpServers[currentNtpServer]);
         Serial.println("Current time: " + getFormattedDate() + " " + getFormattedTime());
         displayMessage("Time synced!");
         delay(1000);
         
         if (locked) {
-            if (!firstScanDone) {
-                displayMessage("Scan for Time-In");
-            } else {
-                displayMessage("Scan again to Unlock");
-            }
+            displayMessage("Scan for Time-In");
         } else {
             displayMessage("Scan To Lock");
         }
         
         lastNtpUpdate = millis();
     } else {
-        Serial.println("❌ NTP time sync failed!");
+        Serial.println("❌ NTP time sync failed with all servers!");
+        // If we're here, all NTP servers failed. Let's rotate to next server for next attempt
+        currentNtpServer = (currentNtpServer + 1) % ntpServerCount;
+        Serial.print("Next attempt will use: ");
+        Serial.println(ntpServers[currentNtpServer]);
+        
         displayMessage("Time sync failed");
         delay(1000);
         
         if (locked) {
-            if (!firstScanDone) {
-                displayMessage("Scan for Time-In");
-            } else {
-                displayMessage("Scan again to Unlock");
-            }
+            displayMessage("Scan for Time-In");
         } else {
             displayMessage("Scan To Lock");
         }
@@ -167,6 +264,9 @@ void updateTimeFromNTP() {
 }
 
 void loop() {
+    // First, check for button presses to change lab number
+    checkButtons();
+    
     // Check if it's time to update from NTP
     if (WiFi.status() == WL_CONNECTED && (millis() - lastNtpUpdate > NTP_UPDATE_INTERVAL_MS)) {
         updateTimeFromNTP();
@@ -188,79 +288,270 @@ void loop() {
             scanComplete = true;  
             Serial.println("Valid QR Data: " + qrData);
             displayQRData(qrData);
-            
+
+            // Check if the system is locked or unlocked
             if (locked) {
-                if (!firstScanDone) {
-                    // This is the first scan - just log time-in
-                    sendDataToFirebase(qrData, true);
-                    lastQRData = qrData;  // Store QR data for verification on second scan
-                    firstScanDone = true;
-                    firstScanTime = millis();
-                    
-                    digitalWrite(GREEN_LED, LOW);  // Keep red LED on
-                    digitalWrite(RED_LED, HIGH);
-                    
-                    displayMessage("Scan again to Unlock");
-                } else {
-                    // This is the second scan - verify and unlock
-                    if (qrData == lastQRData) {
-                        // Same QR code - proceed with unlock
-                        unlockPC();
-                        digitalWrite(GREEN_LED, HIGH);
-                        digitalWrite(RED_LED, LOW);
-                        locked = false;
-                        firstScanDone = false;  // Reset scan state
-                        displayMessage("System Unlocked");
-                        delay(1000);
-                        displayMessage("Scan To Lock");
-                    } else {
-                        // Different QR code - reject
-                        displayMessage("QR Code Mismatch!");
-                        delay(2000);
-                        displayMessage("Scan again to Unlock");
-                    }
-                }
-            } else {  
-                // This is a time-out scan - lock the system
-                sendDataToFirebase(qrData, false);
+                // This is the first scan - unlock the system
+                lastQRData = qrData;  // Store QR data for verification on second scan
+                timeInValue = getFormattedTime();  // Store the time-in value
+                dateValue = getFormattedDate();    // Store the date
+                firstScanDone = true;  // Set the flag
+                unlockPC();            // Call the unlock function
+                locked = false;        // Unlock the system
                 
-                lockPC();
-                digitalWrite(RED_LED, HIGH);
-                digitalWrite(GREEN_LED, LOW);
-                locked = true;
-                firstScanDone = false;  // Reset scan state for next unlock sequence
-                displayMessage("System Locked");
+                // Display status messages
+                u8g2.clearBuffer();
+                u8g2.setFont(u8g2_font_6x10_mr);
+                u8g2.drawStr(0, 10, "QR Scanned:");
+                u8g2.drawStr(0, 20, qrData.c_str());
+                u8g2.drawStr(0, 30, "Time IN recorded:");
+                u8g2.drawStr(0, 40, timeInValue.c_str());
+                u8g2.drawStr(0, 50, "Scan again to logout");
+                u8g2.sendBuffer();
+                
+                digitalWrite(RED_LED, LOW);
+                digitalWrite(GREEN_LED, HIGH);
+                
+                delay(2000);
+                displayMessage("System Unlocked");
                 delay(1000);
-                displayMessage("Scan for Time-In");
+                displayMessage("Scan To Lock");
+                
+                // Note: NOT sending data to API yet
+                Serial.println("Time-In recorded but not sent: " + timeInValue);
+            } else {
+                // This is the second scan - lock the system
+                if (qrData == lastQRData) {
+                    // Same QR code - proceed with lock
+                    String timeOutValue = getFormattedTime();  // Get time-out value
+                    lockPC();                // Call the lock function
+                    locked = true;           // Lock the system
+                    
+                    // Display status
+                    u8g2.clearBuffer();
+                    u8g2.setFont(u8g2_font_6x10_mr);
+                    u8g2.drawStr(0, 10, "QR Scanned:");
+                    u8g2.drawStr(0, 20, qrData.c_str());
+                    u8g2.drawStr(0, 30, "Time OUT recorded:");
+                    u8g2.drawStr(0, 40, timeOutValue.c_str());
+                    u8g2.drawStr(0, 50, "Sending data...");
+                    u8g2.sendBuffer();
+                    
+                    delay(1000);
+                    
+                    // Now send BOTH time-in and time-out data to API
+                    sendLogToAPI(qrData, timeInValue, timeOutValue, dateValue);
+                    
+                    // Reset flag for next session
+                    firstScanDone = false;
+                    
+                    digitalWrite(RED_LED, HIGH);
+                    digitalWrite(GREEN_LED, LOW);
+                    
+                    displayMessage("System Locked");
+                    delay(1000);
+                    displayMessage("Scan for Time-In");
+                } else {
+                    // Different QR code - reject
+                    displayMessage("QR Code Mismatch!");
+                    delay(2000);
+                    displayMessage("Scan again to Lock");
+                }
             }
 
-            delay(2000);  
-            scanComplete = false;  
+            // Reset the scanner to prevent multiple reads
+            delay(2000);  // Optional: Delay to allow for processing
         } else if (qrData.length() > 0) {
             // We got data but it doesn't match our format
             Serial.println("Invalid QR format: " + qrData);
             displayMessage("Invalid QR code");
             delay(2000);
+        }
+    }
+    
+    // Reset scanComplete flag to allow for new scans
+    scanComplete = false;
+}
+
+// Updated function to check all button presses
+void checkButtons() {
+    // Check if enough time has passed since last button press (debouncing)
+    if (millis() - lastButtonPressTime < BUTTON_DEBOUNCE_DELAY) {
+        return;
+    }
+    
+    // Read button states (LOW when pressed because of pull-up resistors)
+    bool leftButtonState = digitalRead(LEFT_BUTTON) == LOW;
+    bool rightButtonState = digitalRead(RIGHT_BUTTON) == LOW;
+    bool upButtonState = digitalRead(UP_BUTTON) == LOW;
+    bool downButtonState = digitalRead(DOWN_BUTTON) == LOW;
+    
+    // Check if left button is pressed (to decrease lab number)
+    if (leftButtonState && !leftButtonPressed) {
+        leftButtonPressed = true;
+        lastButtonPressTime = millis();
+        
+        // Decrease lab number with boundary check
+        if (pcLabNumber > MIN_LAB) {
+            pcLabNumber--;
+            Serial.println("Lab number decreased to: " + String(pcLabNumber));
             
+            // Display updated lab configuration
+            displayLabConfig();
+            delay(1500);
+            
+            // Return to normal display
             if (locked) {
-                if (!firstScanDone) {
-                    displayMessage("Scan for Time-In");
-                } else {
-                    displayMessage("Scan again to Unlock");
-                }
+                displayMessage("Scan for Time-In");
+            } else {
+                displayMessage("Scan To Lock");
+            }
+        } else {
+            // Already at minimum
+            displayMessage("Min Lab Number");
+            delay(1000);
+            
+            // Return to normal display
+            if (locked) {
+                displayMessage("Scan for Time-In");
+            } else {
+                displayMessage("Scan To Lock");
+            }
+        }
+    } 
+    // Check if right button is pressed (to increase lab number)
+    else if (rightButtonState && !rightButtonPressed) {
+        rightButtonPressed = true;
+        lastButtonPressTime = millis();
+        
+        // Increase lab number with boundary check
+        if (pcLabNumber < MAX_LAB) {
+            pcLabNumber++;
+            Serial.println("Lab number increased to: " + String(pcLabNumber));
+            
+            // Display updated lab configuration
+            displayLabConfig();
+            delay(1500);
+            
+            // Return to normal display
+            if (locked) {
+                displayMessage("Scan for Time-In");
+            } else {
+                displayMessage("Scan To Lock");
+            }
+        } else {
+            // Already at maximum
+            displayMessage("Max Lab Number");
+            delay(1000);
+            
+            // Return to normal display
+            if (locked) {
+                displayMessage("Scan for Time-In");
+            } else {
+                displayMessage("Scan To Lock");
+            }
+        }
+    }
+    // Check if up button is pressed (to increase PC number)
+    else if (upButtonState && !upButtonPressed) {
+        upButtonPressed = true;
+        lastButtonPressTime = millis();
+        
+        // Increase PC number with boundary check
+        if (pcNumber < MAX_PC) {
+            pcNumber++;
+            Serial.println("PC number increased to: " + String(pcNumber));
+            
+            // Display updated lab configuration
+            displayLabConfig();
+            delay(1500);
+            
+            // Return to normal display
+            if (locked) {
+                displayMessage("Scan for Time-In");
+            } else {
+                displayMessage("Scan To Lock");
+            }
+        } else {
+            // Already at maximum
+            displayMessage("Max PC Number");
+            delay(1000);
+            
+            // Return to normal display
+            if (locked) {
+                displayMessage("Scan for Time-In");
+            } else {
+                displayMessage("Scan To Lock");
+            }
+        }
+    }
+    // Check if down button is pressed (to decrease PC number)
+    else if (downButtonState && !downButtonPressed) {
+        downButtonPressed = true;
+        lastButtonPressTime = millis();
+        
+        // Decrease PC number with boundary check
+        if (pcNumber > MIN_PC) {
+            pcNumber--;
+            Serial.println("PC number decreased to: " + String(pcNumber));
+            
+            // Display updated lab configuration
+            displayLabConfig();
+            delay(1500);
+            
+            // Return to normal display
+            if (locked) {
+                displayMessage("Scan for Time-In");
+            } else {
+                displayMessage("Scan To Lock");
+            }
+        } else {
+            // Already at minimum
+            displayMessage("Min PC Number");
+            delay(1000);
+            
+            // Return to normal display
+            if (locked) {
+                displayMessage("Scan for Time-In");
             } else {
                 displayMessage("Scan To Lock");
             }
         }
     }
     
-    // Check if first scan has timed out (after 30 seconds)
-    if (firstScanDone && (millis() - firstScanTime > 30000)) {
-        firstScanDone = false;
-        displayMessage("Scan timeout");
-        delay(1000);
-        displayMessage("Scan for Time-In");
+    // Reset button states if released
+    if (!leftButtonState) {
+        leftButtonPressed = false;
     }
+    if (!rightButtonState) {
+        rightButtonPressed = false;
+    }
+    if (!upButtonState) {
+        upButtonPressed = false;
+    }
+    if (!downButtonState) {
+        downButtonPressed = false;
+    }
+}
+
+// Updated function to display the current lab configuration
+void displayLabConfig() {
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_6x10_mr);
+    u8g2.drawStr(0, 10, "PC Configuration:");
+    
+    // Create strings for PC number and lab number
+    char pcNumBuffer[20];
+    sprintf(pcNumBuffer, "PC Number: %d", pcNumber);
+    u8g2.drawStr(0, 25, pcNumBuffer);
+    
+    char labNumBuffer[20];
+    sprintf(labNumBuffer, "Lab Number: %d", pcLabNumber);
+    u8g2.drawStr(0, 40, labNumBuffer);
+    
+    // Updated button hint to show all controls
+    u8g2.drawStr(0, 55, "LAB < > | PC ^ v");
+    u8g2.sendBuffer();
 }
 
 String getFormattedDate() {
@@ -271,12 +562,21 @@ String getFormattedDate() {
     return String(dateBuffer);
 }
 
+// New ISO date format function
+String getFormattedISODate() {
+    // Format date as ISO format "YYYY-MM-DDThh:mm:ss.000+00:00"
+    char dateBuffer[30];
+    sprintf(dateBuffer, "%04d-%02d-%02dT%02d:%02d:%02d.000+00:00", 
+            year(), month(), day(), hour(), minute(), second());
+    return String(dateBuffer);
+}
+
 String getFormattedTime() {
     // Format time as "hh:mm:ss AM/PM" (e.g., "02:30:45 PM")
     char timeBuffer[12];
     int h = hour();
     const char* ampm = h >= 12 ? "PM" : "AM";
-    h = h > 12 ? h - 12 : h;
+    h = h > 12 ? h - 12 : h;  // Handle 24-hour to 12-hour conversion
     h = h == 0 ? 12 : h;  // Handle midnight (0 hour) as 12 AM
     
     sprintf(timeBuffer, "%02d:%02d:%02d %s", 
@@ -284,73 +584,84 @@ String getFormattedTime() {
     return String(timeBuffer);
 }
 
-void sendDataToFirebase(String qrData, bool isTimeIn) {
-    // Get current date and time at the moment of scanning
-    String formattedDate = getFormattedDate();
-    String formattedTime = getFormattedTime();
-    
-    // Create a path using the QR code as a key
-    // This will create a structure like /scannedData/UA202201146/sessions/timestamp/...
-    String sanitizedDate = formattedDate;
-    sanitizedDate.replace(" ", "_");  // Replace spaces with underscores
-    
-    // Generate a timestamp-based ID for this scan session
-    // Fix for the String(now()) ambiguity - explicitly cast to unsigned long first
-    unsigned long epochTime = (unsigned long)now();  
-    String timestamp = String(epochTime);
-    
-    // Create the path - organizing by QR code, then by session timestamp
-    String path = "/scannedData/" + qrData + "/sessions/" + timestamp + ".json";
-    
-    String jsonData;
-    if (isTimeIn) {
-        // Time-in record - Fix string concatenation
-        jsonData = "{\"date\": \"" + formattedDate + "\", "
-                + "\"time\": \"" + formattedTime + "\", "
-                + "\"status\": \"in\"}";
-    } else {
-        // Time-out record - Fix string concatenation
-        jsonData = "{\"date\": \"" + formattedDate + "\", "
-                + "\"time\": \"" + formattedTime + "\", "
-                + "\"status\": \"out\"}";
-    }
+// Modified function to use ISO date format and send the updated PC lab number
+void sendLogToAPI(String qrData, String timeIn, String timeOut, String date) {
+    // Create JSON data to send to the API
+    String jsonData = "{";
+    jsonData += "\"studentID\": \"" + qrData + "\", ";
+    jsonData += "\"date\": \"" + getFormattedISODate() + "\", "; // Use ISO date format instead
+    jsonData += "\"pcNumber\": " + String(pcNumber) + ", "; // Use the current PC number
+    jsonData += "\"pcLab\": " + String(pcLabNumber) + ", "; // Use the current lab number
+    jsonData += "\"timeIn\": \"" + timeIn + "\", ";
+    jsonData += "\"timeOut\": \"" + timeOut + "\", ";
+    jsonData += "\"password\": \"$2a$15$qA8d5vh8g0fC042HrZqNm..gHu9UuoPAG4QBMY2DCr4GiV69tdbr.\"}";
 
-    Serial.println("Sending data to Firebase...");
-    Serial.println("Path: " + path);
+    Serial.println("Sending data to API endpoint...");
     Serial.println("Data: " + jsonData);
 
-    httpClient.setTimeout(5000);
+    // Set a timeout for the HTTP request
+    httpClient.setTimeout(10000);  // 10 second timeout
+    
+    // Begin HTTP request
     httpClient.beginRequest();
-    httpClient.put(path);  // Using PUT instead of POST to set data at a specific path
+    httpClient.post(API_PATH);  // Using POST to send data to the endpoint
     httpClient.sendHeader("Content-Type", "application/json");
     httpClient.sendHeader("Content-Length", jsonData.length());
     httpClient.beginBody();
     httpClient.print(jsonData);
     httpClient.endRequest();
 
+    // Get response from the server
     int statusCode = httpClient.responseStatusCode();
     String response = httpClient.responseBody();
 
     Serial.print("HTTP Status code: ");
     Serial.println(statusCode);
-    Serial.println("Firebase Response: " + response);
+    Serial.println("API Response: " + response);
 
-    if (statusCode == 200) {
+    // Update LED status based on the response
+    if (statusCode >= 200 && statusCode < 300) {
         Serial.println("✅ Data sent successfully!");
+        digitalWrite(GREEN_LED, HIGH);
+        digitalWrite(RED_LED, LOW);
         
-        // Display time info on OLED
+        // Display success message with time info on OLED
+        // FIXED: String concatenation issues by creating temporary strings
+        String inTimeDisplay = "IN: " + timeIn;
+        String outTimeDisplay = "OUT: " + timeOut;
+        
         u8g2.clearBuffer();
         u8g2.setFont(u8g2_font_6x10_mr);
         u8g2.drawStr(0, 10, "QR Scanned:");
         u8g2.drawStr(0, 20, qrData.c_str());
-        u8g2.drawStr(0, 30, isTimeIn ? "Time IN:" : "Time OUT:");
-        u8g2.drawStr(0, 40, formattedTime.c_str());
-        u8g2.drawStr(0, 50, formattedDate.c_str());
+        u8g2.drawStr(0, 30, "Data Sent:");
+        u8g2.drawStr(0, 40, inTimeDisplay.c_str());  // Fixed here
+        u8g2.drawStr(0, 50, outTimeDisplay.c_str()); // Fixed here
         u8g2.sendBuffer();
+        
+        delay(2000);
+        
+        // Reset LED state
+        if (locked) {
+            digitalWrite(RED_LED, HIGH);
+            digitalWrite(GREEN_LED, LOW);
+        } else {
+            digitalWrite(RED_LED, LOW);
+            digitalWrite(GREEN_LED, HIGH);
+        }
     } else {
         Serial.println("❌ Failed to send data!");
-        displayMessage("Firebase Error");
-        delay(1000);
+        digitalWrite(RED_LED, HIGH);
+        digitalWrite(GREEN_LED, LOW);
+        
+        displayMessage("API Error");
+        delay(2000);
+        
+        if (locked) {
+            displayMessage("Scan for Time-In");
+        } else {
+            displayMessage("Scan To Lock");
+        }
     }
 }
 
@@ -384,6 +695,9 @@ void connectToWiFi() {
             Serial.println("\n✅ WiFi Connected!");
             Serial.print("IP Address: ");
             Serial.println(WiFi.localIP());
+            Serial.print("WiFi signal strength (RSSI): ");
+            Serial.print(WiFi.RSSI());
+            Serial.println(" dBm");
             
             // Check if IP is valid
             if (WiFi.localIP()[0] != 0) {
@@ -407,15 +721,18 @@ void connectToWiFi() {
 void unlockPC() {
     Serial.println("Unlocking PC...");
     displayMessage("Unlocking PC...");
-    delay(500);  
+    delay(500);
     Keyboard.press(KEY_F1);
     delay(100);
-    Keyboard.releaseAll();
-    delay(500);
+    Keyboard.release(KEY_F1);
+    // ito ang dahilan pag mabilis and delay hindi gagana
+    delay(1000);
+    // Type the password
     Keyboard.print("hannipham");
-    delay(500);
+    delay(100);
     Keyboard.press(KEY_RETURN);
     delay(100);
+    Keyboard.release(KEY_RETURN);
     Keyboard.releaseAll();
 }
 
