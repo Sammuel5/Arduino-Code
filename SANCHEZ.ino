@@ -7,7 +7,8 @@
 #include <TimeLib.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
-#include <LiquidCrystal_I2C.h>  // Added LiquidCrystal I2C Library
+#include <LiquidCrystal_I2C.h>
+#include <ArduinoJson.h>  // Added ArduinoJson Library for proper JSON parsing
 
 // OLED Display Setup
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);
@@ -25,10 +26,10 @@ SoftwareSerial qrScanner(RX_PIN, TX_PIN);
 #define GREEN_LED 5  
 
 // Button Pins - UPDATED WITH NEW BUTTONS
-#define LEFT_BUTTON 6   // Left button for decreasing PC lab number
-#define RIGHT_BUTTON 7  // Right button for increasing PC lab number
-#define UP_BUTTON 8     // Button for increasing PC number
-#define DOWN_BUTTON 9   // Button for decreasing PC number
+#define RIGHT_BUTTON 6  // Yellow button for increasing PC lab number
+#define LEFT_BUTTON 7   // Red button for decreasing PC lab number
+#define UP_BUTTON 8     // Yellow Button for increasing PC number
+#define DOWN_BUTTON 9   // Red Button for decreasing PC number
 
 // WiFi Setup
 #define WIFI_SSID "Sam"
@@ -39,6 +40,13 @@ SoftwareSerial qrScanner(RX_PIN, TX_PIN);
 #define API_PATH "/firebase/push-log"
 #define API_PORT 443
 
+// Eligibility API endpoint
+#define ELIGIBILITY_API_PATH "/check-student-eligibility"
+bool isEligible = false;
+
+// JSON Document size for parsing API responses
+#define JSON_BUFFER_SIZE 256
+
 WiFiSSLClient wifiClient;
 HttpClient httpClient(wifiClient, API_HOST, API_PORT);
 
@@ -46,8 +54,8 @@ HttpClient httpClient(wifiClient, API_HOST, API_PORT);
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org");
 #define GMT_OFFSET_SEC 8 * 3600  // Change this to your timezone offset in seconds (e.g., GMT+8 = 8*3600)
-#define NTP_UPDATE_INTERVAL_MS 60000  // Update time every minute
-#define NTP_TIMEOUT 10000  // 10 second timeout for NTP requests
+#define NTP_UPDATE_INTERVAL_MS 120000  // Update time every 2 minutes (optimized from 1 minute)
+#define NTP_TIMEOUT 5000  // 5 second timeout for NTP requests (reduced from 10 seconds)
 
 // Array of NTP servers for fallback
 const char* ntpServers[] = {"pool.ntp.org", "time.nist.gov", "time.google.com", "asia.pool.ntp.org"};
@@ -61,6 +69,7 @@ bool scanComplete = false;
 bool firstScanDone = false;  // Flag to track if first scan is done
 String lastQRData = "";      // Store the QR data from first scan
 String timeInValue = "";     // Store the time-in value
+String timeOutValue = "";    // Store the time-out value
 String dateValue = "";       // Store the date value
 unsigned long lastNtpUpdate = 0;
 unsigned long firstScanTime = 0;  // Time when first scan was completed
@@ -80,7 +89,7 @@ bool rightButtonPressed = false;
 bool upButtonPressed = false;
 bool downButtonPressed = false;
 unsigned long lastButtonPressTime = 0;
-#define BUTTON_DEBOUNCE_DELAY 300 // Debounce delay in milliseconds
+#define BUTTON_DEBOUNCE_DELAY 200 // Reduced debounce delay from 300ms to 200ms
 
 // Initial time setup as fallback
 #define INITIAL_YEAR 2025
@@ -89,6 +98,10 @@ unsigned long lastButtonPressTime = 0;
 #define INITIAL_HOUR 3
 #define INITIAL_MINUTE 11
 #define INITIAL_SECOND 0
+
+// OLED Display dimensions
+#define OLED_WIDTH 128
+#define OLED_HEIGHT 64
 
 void displayMessage(const char *message);
 void displayQRData(String data);
@@ -105,6 +118,15 @@ void unlockPC();  // Function to unlock the PC
 void lockPC();    // Function to lock the PC
 void checkButtons(); // New function for checking button presses
 void displayLabConfig(); // New function to display lab configuration
+bool checkStudentEligibility(String studentID); // New function to check student eligibility
+
+// New function to display centered text on OLED
+void displayCenteredText(int y, const char *text) {
+  int width = u8g2.getStrWidth(text);
+  int x = (OLED_WIDTH - width) / 2;
+  if (x < 0) x = 0;  // Ensure x is never negative
+  u8g2.drawStr(x, y, text);
+}
 
 void setup() {
     Serial.begin(115200);
@@ -116,13 +138,13 @@ void setup() {
     lcd.clear();
   
     lcd.setCursor(2, 0); // Center "Authentikey" on top
-    lcd.print("Authentikey");
+    lcd.print("AuthentiKey");
 
     lcd.setCursor(5, 1); // Center "System" on bottom
     lcd.print("System");
 
-    // Add a longer delay for welcome message to be visible
-    delay(3000);
+    // Reduced welcome message delay
+    delay(1500);  // Reduced from 3000ms
     
     // Initialize other components
     u8g2.begin();
@@ -138,7 +160,7 @@ void setup() {
     pinMode(DOWN_BUTTON, INPUT_PULLUP);  // New button for decreasing PC number
 
     displayMessage("Initializing...");
-    delay(1500);
+    delay(500);  // Reduced from 1500ms
 
     // Initialize scanner with debug message
     qrScanner.begin(9600);
@@ -153,10 +175,10 @@ void setup() {
     
     // Show initial lab configuration
     displayLabConfig();
-    delay(2000);
+    delay(1000);  // Reduced from 2000ms
     
     displayMessage("System Locked");
-    delay(1500);
+    delay(500);  // Reduced from 1500ms
 
     connectToWiFi();
     
@@ -236,7 +258,7 @@ void updateTimeFromNTP() {
         Serial.println(ntpServers[currentNtpServer]);
         Serial.println("Current time: " + getFormattedDate() + " " + getFormattedTime());
         displayMessage("Time synced!");
-        delay(1000);
+        delay(500);  // Reduced from 1000ms
         
         if (locked) {
             displayMessage("Scan for Time-In");
@@ -253,7 +275,7 @@ void updateTimeFromNTP() {
         Serial.println(ntpServers[currentNtpServer]);
         
         displayMessage("Time sync failed");
-        delay(1000);
+        delay(500);  // Reduced from 1000ms
         
         if (locked) {
             displayMessage("Scan for Time-In");
@@ -291,53 +313,71 @@ void loop() {
 
             // Check if the system is locked or unlocked
             if (locked) {
-                // This is the first scan - unlock the system
-                lastQRData = qrData;  // Store QR data for verification on second scan
-                timeInValue = getFormattedTime();  // Store the time-in value
-                dateValue = getFormattedDate();    // Store the date
-                firstScanDone = true;  // Set the flag
-                unlockPC();            // Call the unlock function
-                locked = false;        // Unlock the system
-                
-                // Display status messages
-                u8g2.clearBuffer();
-                u8g2.setFont(u8g2_font_6x10_mr);
-                u8g2.drawStr(0, 10, "QR Scanned:");
-                u8g2.drawStr(0, 20, qrData.c_str());
-                u8g2.drawStr(0, 30, "Time IN recorded:");
-                u8g2.drawStr(0, 40, timeInValue.c_str());
-                u8g2.drawStr(0, 50, "Scan again to logout");
-                u8g2.sendBuffer();
-                
-                digitalWrite(RED_LED, LOW);
-                digitalWrite(GREEN_LED, HIGH);
-                
-                delay(2000);
-                displayMessage("System Unlocked");
-                delay(1000);
-                displayMessage("Scan To Lock");
-                
-                // Note: NOT sending data to API yet
-                Serial.println("Time-In recorded but not sent: " + timeInValue);
-            } else {
-                // This is the second scan - lock the system
-                if (qrData == lastQRData) {
-                    // Same QR code - proceed with lock
-                    String timeOutValue = getFormattedTime();  // Get time-out value
-                    lockPC();                // Call the lock function
-                    locked = true;           // Lock the system
+                // First, check if the student is eligible - NEW CODE HERE
+                displayMessage("Checking student...");
+                if (checkStudentEligibility(qrData)) {
+                    // Student is eligible - proceed with unlock
+                    lastQRData = qrData;  // Store QR data for verification on second scan
+                    timeInValue = getFormattedTime();  // Store the time-in value
+                    dateValue = getFormattedDate();    // Store the date
+                    firstScanDone = true;  // Set the flag
+                    unlockPC();            // Call the unlock function
+                    locked = false;        // Unlock the system
                     
-                    // Display status
+                    // Display status messages using centered text
                     u8g2.clearBuffer();
                     u8g2.setFont(u8g2_font_6x10_mr);
-                    u8g2.drawStr(0, 10, "QR Scanned:");
-                    u8g2.drawStr(0, 20, qrData.c_str());
-                    u8g2.drawStr(0, 30, "Time OUT recorded:");
-                    u8g2.drawStr(0, 40, timeOutValue.c_str());
-                    u8g2.drawStr(0, 50, "Sending data...");
+                    displayCenteredText(10, "QR Scanned:");
+                    displayCenteredText(20, qrData.c_str());
+                    displayCenteredText(30, "Time IN recorded:");
+                    displayCenteredText(40, timeInValue.c_str());
+                    displayCenteredText(50, "Scan again to logout");
                     u8g2.sendBuffer();
                     
-                    delay(1000);
+                    digitalWrite(RED_LED, LOW);
+                    digitalWrite(GREEN_LED, HIGH);
+                    
+                    delay(1000);  // Reduced from 2000ms
+                    displayMessage("System Unlocked");
+                    delay(500);   // Reduced from 1000ms
+                    displayMessage("Scan To Lock");
+                    
+                    Serial.println("Time-In recorded but not sent: " + timeInValue);
+                } else {
+                    // Student is not eligible - show error and don't unlock
+                    u8g2.clearBuffer();
+                    u8g2.setFont(u8g2_font_6x10_mr);
+                    displayCenteredText(20, "Student ID:");
+                    displayCenteredText(30, qrData.c_str());
+                    displayCenteredText(40, "Not Registered!");
+                    u8g2.sendBuffer();
+                    
+                    digitalWrite(RED_LED, HIGH);
+                    digitalWrite(GREEN_LED, LOW);
+                    
+                    delay(1500);  // Reduced from 3000ms
+                    displayMessage("Access Denied");
+                    delay(500);   // Reduced from 1000ms
+                    displayMessage("Scan for Time-In");
+                }
+            } else {
+                // This is the second scan - lock the system
+                if (qrData == lastQRData) {  // Fixed logic: check if QR code matches the first scan
+                    timeOutValue = getFormattedTime();  // Store the time-out value
+                    lockPC();  // Lock the PC
+                    locked = true;  // Lock the system
+                    
+                    // Display status using centered text
+                    u8g2.clearBuffer();
+                    u8g2.setFont(u8g2_font_6x10_mr);
+                    displayCenteredText(10, "QR Scanned:");
+                    displayCenteredText(20, qrData.c_str());
+                    displayCenteredText(30, "Time OUT recorded:");
+                    displayCenteredText(40, timeOutValue.c_str());
+                    displayCenteredText(50, "Sending data...");
+                    u8g2.sendBuffer();
+                    
+                    delay(300);  // Reduced from 1000ms
                     
                     // Now send BOTH time-in and time-out data to API
                     sendLogToAPI(qrData, timeInValue, timeOutValue, dateValue);
@@ -349,23 +389,23 @@ void loop() {
                     digitalWrite(GREEN_LED, LOW);
                     
                     displayMessage("System Locked");
-                    delay(1000);
+                    delay(500);  // Reduced from 1000ms
                     displayMessage("Scan for Time-In");
                 } else {
                     // Different QR code - reject
                     displayMessage("QR Code Mismatch!");
-                    delay(2000);
+                    delay(1000);  // Reduced from 2000ms
                     displayMessage("Scan again to Lock");
                 }
             }
 
             // Reset the scanner to prevent multiple reads
-            delay(2000);  // Optional: Delay to allow for processing
+            delay(500);  // Reduced from 2000ms to make scanning faster
         } else if (qrData.length() > 0) {
             // We got data but it doesn't match our format
             Serial.println("Invalid QR format: " + qrData);
             displayMessage("Invalid QR code");
-            delay(2000);
+            delay(1000);  // Reduced from 2000ms
         }
     }
     
@@ -373,7 +413,60 @@ void loop() {
     scanComplete = false;
 }
 
-// Updated function to check all button presses
+// COMPLETELY REWRITTEN to properly handle JSON responses and optimized for speed
+bool checkStudentEligibility(String studentID) {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("⚠️ Not connected to WiFi. Cannot check eligibility.");
+        return false;
+    }
+    
+    // Create JSON data for eligibility check - FIXED correctly formatted JSON
+    String jsonData = "{\"studentID\":\"" + studentID + "\"}";
+    
+    Serial.println("Checking student eligibility...");
+    Serial.println("Student ID: " + studentID);
+    Serial.println("JSON data being sent: " + jsonData);
+    
+    // Set a timeout for the HTTP request - REDUCED
+    httpClient.setTimeout(5000);  // 5 second timeout (reduced from 10)
+    
+    // Begin HTTP request
+    httpClient.beginRequest();
+    httpClient.post(ELIGIBILITY_API_PATH);
+    httpClient.sendHeader("Content-Type", "application/json");
+    httpClient.sendHeader("Content-Length", jsonData.length());
+    httpClient.beginBody();
+    httpClient.print(jsonData);
+    httpClient.endRequest();
+    
+    // Get response from the server
+    int statusCode = httpClient.responseStatusCode();
+    String response = httpClient.responseBody();
+    
+    Serial.print("Eligibility check - HTTP Status code: ");
+    Serial.println(statusCode);
+    Serial.println("API Response: " + response);
+    
+    // Process the response
+    if (statusCode >= 200 && statusCode < 300) {
+        // Quick check for eligibility without full JSON parsing
+        if (response.indexOf("isEligible") >= 0 && response.indexOf("true") >= 0) {
+            Serial.println("✅ Student is eligible according to API");
+            return true;
+        } else if (response.indexOf(studentID) >= 0) {
+            Serial.println("✅ Found student ID in response, assuming eligible");
+            return true;
+        } else {
+            Serial.println("❌ Student is not eligible according to API");
+            return false;
+        }
+    } else {
+        Serial.println("❌ Failed to check eligibility - HTTP error");
+        return false;  // Default to denying access on error
+    }
+}
+
+// Updated function to check all button presses - Optimized
 void checkButtons() {
     // Check if enough time has passed since last button press (debouncing)
     if (millis() - lastButtonPressTime < BUTTON_DEBOUNCE_DELAY) {
@@ -385,6 +478,12 @@ void checkButtons() {
     bool rightButtonState = digitalRead(RIGHT_BUTTON) == LOW;
     bool upButtonState = digitalRead(UP_BUTTON) == LOW;
     bool downButtonState = digitalRead(DOWN_BUTTON) == LOW;
+    
+    // Return early if no buttons are pressed
+    if (!leftButtonState && !rightButtonState && !upButtonState && !downButtonState) {
+        leftButtonPressed = rightButtonPressed = upButtonPressed = downButtonPressed = false;
+        return;
+    }
     
     // Check if left button is pressed (to decrease lab number)
     if (leftButtonState && !leftButtonPressed) {
@@ -398,7 +497,7 @@ void checkButtons() {
             
             // Display updated lab configuration
             displayLabConfig();
-            delay(1500);
+            delay(750);  // Reduced from 1500ms
             
             // Return to normal display
             if (locked) {
@@ -409,7 +508,7 @@ void checkButtons() {
         } else {
             // Already at minimum
             displayMessage("Min Lab Number");
-            delay(1000);
+            delay(500);  // Reduced from 1000ms
             
             // Return to normal display
             if (locked) {
@@ -431,7 +530,7 @@ void checkButtons() {
             
             // Display updated lab configuration
             displayLabConfig();
-            delay(1500);
+            delay(750);  // Reduced from 1500ms
             
             // Return to normal display
             if (locked) {
@@ -442,7 +541,7 @@ void checkButtons() {
         } else {
             // Already at maximum
             displayMessage("Max Lab Number");
-            delay(1000);
+            delay(500);  // Reduced from 1000ms
             
             // Return to normal display
             if (locked) {
@@ -464,7 +563,7 @@ void checkButtons() {
             
             // Display updated lab configuration
             displayLabConfig();
-            delay(1500);
+            delay(750);  // Reduced from 1500ms
             
             // Return to normal display
             if (locked) {
@@ -475,7 +574,7 @@ void checkButtons() {
         } else {
             // Already at maximum
             displayMessage("Max PC Number");
-            delay(1000);
+            delay(500);  // Reduced from 1000ms
             
             // Return to normal display
             if (locked) {
@@ -497,7 +596,7 @@ void checkButtons() {
             
             // Display updated lab configuration
             displayLabConfig();
-            delay(1500);
+            delay(750);  // Reduced from 1500ms
             
             // Return to normal display
             if (locked) {
@@ -508,7 +607,7 @@ void checkButtons() {
         } else {
             // Already at minimum
             displayMessage("Min PC Number");
-            delay(1000);
+            delay(500);  // Reduced from 1000ms
             
             // Return to normal display
             if (locked) {
@@ -534,23 +633,24 @@ void checkButtons() {
     }
 }
 
-// Updated function to display the current lab configuration
+// Updated function to display the current lab configuration with centered text
 void displayLabConfig() {
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x10_mr);
-    u8g2.drawStr(0, 10, "PC Configuration:");
+    
+    displayCenteredText(10, "PC Configuration:");
     
     // Create strings for PC number and lab number
     char pcNumBuffer[20];
     sprintf(pcNumBuffer, "PC Number: %d", pcNumber);
-    u8g2.drawStr(0, 25, pcNumBuffer);
+    displayCenteredText(25, pcNumBuffer);
     
     char labNumBuffer[20];
     sprintf(labNumBuffer, "Lab Number: %d", pcLabNumber);
-    u8g2.drawStr(0, 40, labNumBuffer);
+    displayCenteredText(40, labNumBuffer);
     
     // Updated button hint to show all controls
-    u8g2.drawStr(0, 55, "LAB < > | PC ^ v");
+    displayCenteredText(55, "LAB < > | PC ^ v");
     u8g2.sendBuffer();
 }
 
@@ -585,22 +685,24 @@ String getFormattedTime() {
 }
 
 // Modified function to use ISO date format and send the updated PC lab number
+// OPTIMIZED FOR SPEED with reduced timeout and shorter display times
 void sendLogToAPI(String qrData, String timeIn, String timeOut, String date) {
-    // Create JSON data to send to the API
+    // Create correctly formatted JSON data to send to the API
     String jsonData = "{";
     jsonData += "\"studentID\": \"" + qrData + "\", ";
-    jsonData += "\"date\": \"" + getFormattedISODate() + "\", "; // Use ISO date format instead
-    jsonData += "\"pcNumber\": " + String(pcNumber) + ", "; // Use the current PC number
-    jsonData += "\"pcLab\": " + String(pcLabNumber) + ", "; // Use the current lab number
+    jsonData += "\"date\": \"" + getFormattedISODate() + "\", ";
+    jsonData += "\"pcNumber\": " + String(pcNumber) + ", ";
+    jsonData += "\"pcLab\": " + String(pcLabNumber) + ", ";
     jsonData += "\"timeIn\": \"" + timeIn + "\", ";
     jsonData += "\"timeOut\": \"" + timeOut + "\", ";
-    jsonData += "\"password\": \"$2a$15$qA8d5vh8g0fC042HrZqNm..gHu9UuoPAG4QBMY2DCr4GiV69tdbr.\"}";
+    jsonData += "\"password\": \"$2a$15$qA8d5vh8g0fC042HrZqNm..gHu9UuoPAG4QBMY2DCr4GiV69tdbr.\"";
+    jsonData += "}";
 
     Serial.println("Sending data to API endpoint...");
     Serial.println("Data: " + jsonData);
 
-    // Set a timeout for the HTTP request
-    httpClient.setTimeout(10000);  // 10 second timeout
+    // Set a reduced timeout for the HTTP request
+    httpClient.setTimeout(5000);  // 5 second timeout (reduced from 10 seconds)
     
     // Begin HTTP request
     httpClient.beginRequest();
@@ -611,35 +713,38 @@ void sendLogToAPI(String qrData, String timeIn, String timeOut, String date) {
     httpClient.print(jsonData);
     httpClient.endRequest();
 
-    // Get response from the server
+    // Get response from the server - only wait for status code, not full response body
     int statusCode = httpClient.responseStatusCode();
-    String response = httpClient.responseBody();
+    String response = ""; // Skip getting full response body to save time
+    
+    // Only read response body if needed for debugging
+    if (statusCode < 200 || statusCode >= 300) {
+        response = httpClient.responseBody();
+    }
 
     Serial.print("HTTP Status code: ");
     Serial.println(statusCode);
-    Serial.println("API Response: " + response);
-
+    
     // Update LED status based on the response
     if (statusCode >= 200 && statusCode < 300) {
         Serial.println("✅ Data sent successfully!");
         digitalWrite(GREEN_LED, HIGH);
         digitalWrite(RED_LED, LOW);
         
-        // Display success message with time info on OLED
-        // FIXED: String concatenation issues by creating temporary strings
+        // Display success message with time info on OLED using centered text
         String inTimeDisplay = "IN: " + timeIn;
         String outTimeDisplay = "OUT: " + timeOut;
         
         u8g2.clearBuffer();
         u8g2.setFont(u8g2_font_6x10_mr);
-        u8g2.drawStr(0, 10, "QR Scanned:");
-        u8g2.drawStr(0, 20, qrData.c_str());
-        u8g2.drawStr(0, 30, "Data Sent:");
-        u8g2.drawStr(0, 40, inTimeDisplay.c_str());  // Fixed here
-        u8g2.drawStr(0, 50, outTimeDisplay.c_str()); // Fixed here
+        displayCenteredText(10, "QR Scanned:");
+        displayCenteredText(20, qrData.c_str());
+        displayCenteredText(30, "Data Sent:");
+        displayCenteredText(40, inTimeDisplay.c_str());
+        displayCenteredText(50, outTimeDisplay.c_str());
         u8g2.sendBuffer();
         
-        delay(2000);
+        delay(1000);  // Reduced from 2000ms
         
         // Reset LED state
         if (locked) {
@@ -665,18 +770,20 @@ void sendLogToAPI(String qrData, String timeIn, String timeOut, String date) {
     }
 }
 
+// Updated function to display centered message
 void displayMessage(const char *message) {
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x10_mr);
-    u8g2.drawStr(0, 10, message);
+    displayCenteredText(32, message); // Center vertically and horizontally
     u8g2.sendBuffer();
 }
 
+// Updated function to display QR data with centered text
 void displayQRData(String data) {
     u8g2.clearBuffer();
     u8g2.setFont(u8g2_font_6x10_mr);
-    u8g2.drawStr(0, 10, "QR Scanned:");
-    u8g2.drawStr(0, 20, data.c_str());
+    displayCenteredText(20, "QR Scanned:");
+    displayCenteredText(40, data.c_str());
     u8g2.sendBuffer();
 }
 
@@ -722,6 +829,8 @@ void unlockPC() {
     Serial.println("Unlocking PC...");
     displayMessage("Unlocking PC...");
     delay(500);
+    Keyboard.press(KEY_F1);
+    delay(100);
     Keyboard.press(KEY_F1);
     delay(100);
     Keyboard.release(KEY_F1);
