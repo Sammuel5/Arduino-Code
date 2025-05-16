@@ -503,7 +503,7 @@ void checkButtons() {
             
             // Display updated lab configuration
             displayLabConfig();
-            delay(1500);
+            delay(5000);
             
             // Return to normal display
             if (locked) {
@@ -514,7 +514,7 @@ void checkButtons() {
         } else {
             // Already at minimum
             displayMessage("Min Lab Number");
-            delay(1000);
+            delay(5000);
             
             // Return to normal display
             if (locked) {
@@ -536,7 +536,7 @@ void checkButtons() {
             
             // Display updated lab configuration
             displayLabConfig();
-            delay(1500);
+            delay(5000);
             
             // Return to normal display
             if (locked) {
@@ -547,7 +547,7 @@ void checkButtons() {
         } else {
             // Already at maximum
             displayMessage("Max Lab Number");
-            delay(1000);
+            delay(5000);
             
             // Return to normal display
             if (locked) {
