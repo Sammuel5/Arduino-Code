@@ -8,7 +8,7 @@
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <LiquidCrystal_I2C.h>
-#include <ArduinoJson.h>
+#include <ArduinoJson.h>  // Added ArduinoJson Library for proper JSON parsing
 
 // OLED Display Setup
 U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0);
@@ -44,6 +44,9 @@ SoftwareSerial qrScanner(RX_PIN, TX_PIN);
 #define ELIGIBILITY_API_PATH "/check-student-eligibility"
 bool isEligible = false;
 
+String unlockPassword = "Dnrs";  // Default password, now changeable
+#define PASSWORD_API_PATH "/admin/change-pc-password"
+
 // JSON Document size for parsing API responses
 #define JSON_BUFFER_SIZE 256
 
@@ -54,8 +57,8 @@ HttpClient httpClient(wifiClient, API_HOST, API_PORT);
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org");
 #define GMT_OFFSET_SEC 8 * 3600  // Change this to your timezone offset in seconds (e.g., GMT+8 = 8*3600)
-#define NTP_UPDATE_INTERVAL_MS 60000  // Update time every minute
-#define NTP_TIMEOUT 10000  // 10 second timeout for NTP requests
+#define NTP_UPDATE_INTERVAL_MS 120000  // Update time every 2 minutes (optimized from 1 minute)
+#define NTP_TIMEOUT 5000  // 5 second timeout for NTP requests (reduced from 10 seconds)
 
 // Array of NTP servers for fallback
 const char* ntpServers[] = {"pool.ntp.org", "time.nist.gov", "time.google.com", "asia.pool.ntp.org"};
@@ -89,7 +92,7 @@ bool rightButtonPressed = false;
 bool upButtonPressed = false;
 bool downButtonPressed = false;
 unsigned long lastButtonPressTime = 0;
-#define BUTTON_DEBOUNCE_DELAY 300 // Debounce delay in milliseconds
+#define BUTTON_DEBOUNCE_DELAY 200 // Reduced debounce delay from 300ms to 200ms
 
 // Initial time setup as fallback
 #define INITIAL_YEAR 2025
@@ -119,6 +122,7 @@ void lockPC();    // Function to lock the PC
 void checkButtons(); // New function for checking button presses
 void displayLabConfig(); // New function to display lab configuration
 bool checkStudentEligibility(String studentID); // New function to check student eligibility
+bool changeUnlockPassword();
 
 // New function to display centered text on OLED
 void displayCenteredText(int y, const char *text) {
@@ -143,8 +147,8 @@ void setup() {
     lcd.setCursor(5, 1); // Center "System" on bottom
     lcd.print("System");
 
-    // Add a longer delay for welcome message to be visible
-    delay(3000);
+    // Reduced welcome message delay
+    delay(1500);  // Reduced from 3000ms
     
     // Initialize other components
     u8g2.begin();
@@ -160,7 +164,7 @@ void setup() {
     pinMode(DOWN_BUTTON, INPUT_PULLUP);  // New button for decreasing PC number
 
     displayMessage("Initializing...");
-    delay(1500);
+    delay(500);  // Reduced from 1500ms
 
     // Initialize scanner with debug message
     qrScanner.begin(9600);
@@ -175,10 +179,10 @@ void setup() {
     
     // Show initial lab configuration
     displayLabConfig();
-    delay(2000);
+    delay(1000);  // Reduced from 2000ms
     
     displayMessage("System Locked");
-    delay(1500);
+    delay(500);  // Reduced from 1500ms
 
     connectToWiFi();
     
@@ -258,7 +262,7 @@ void updateTimeFromNTP() {
         Serial.println(ntpServers[currentNtpServer]);
         Serial.println("Current time: " + getFormattedDate() + " " + getFormattedTime());
         displayMessage("Time synced!");
-        delay(1000);
+        delay(500);  // Reduced from 1000ms
         
         if (locked) {
             displayMessage("Scan for Time-In");
@@ -275,7 +279,7 @@ void updateTimeFromNTP() {
         Serial.println(ntpServers[currentNtpServer]);
         
         displayMessage("Time sync failed");
-        delay(1000);
+        delay(500);  // Reduced from 1000ms
         
         if (locked) {
             displayMessage("Scan for Time-In");
@@ -337,9 +341,9 @@ void loop() {
                     digitalWrite(RED_LED, LOW);
                     digitalWrite(GREEN_LED, HIGH);
                     
-                    delay(2000);
+                    delay(1000);  // Reduced from 2000ms
                     displayMessage("System Unlocked");
-                    delay(1000);
+                    delay(500);   // Reduced from 1000ms
                     displayMessage("Scan To Lock");
                     
                     Serial.println("Time-In recorded but not sent: " + timeInValue);
@@ -355,9 +359,9 @@ void loop() {
                     digitalWrite(RED_LED, HIGH);
                     digitalWrite(GREEN_LED, LOW);
                     
-                    delay(3000);
+                    delay(1500);  // Reduced from 3000ms
                     displayMessage("Access Denied");
-                    delay(1000);
+                    delay(500);   // Reduced from 1000ms
                     displayMessage("Scan for Time-In");
                 }
             } else {
@@ -377,7 +381,7 @@ void loop() {
                     displayCenteredText(50, "Sending data...");
                     u8g2.sendBuffer();
                     
-                    delay(1000);
+                    delay(300);  // Reduced from 1000ms
                     
                     // Now send BOTH time-in and time-out data to API
                     sendLogToAPI(qrData, timeInValue, timeOutValue, dateValue);
@@ -389,23 +393,23 @@ void loop() {
                     digitalWrite(GREEN_LED, LOW);
                     
                     displayMessage("System Locked");
-                    delay(1000);
+                    delay(500);  // Reduced from 1000ms
                     displayMessage("Scan for Time-In");
                 } else {
                     // Different QR code - reject
                     displayMessage("QR Code Mismatch!");
-                    delay(2000);
+                    delay(1000);  // Reduced from 2000ms
                     displayMessage("Scan again to Lock");
                 }
             }
 
             // Reset the scanner to prevent multiple reads
-            delay(2000);  // Optional: Delay to allow for processing
+            delay(500);  // Reduced from 2000ms to make scanning faster
         } else if (qrData.length() > 0) {
             // We got data but it doesn't match our format
             Serial.println("Invalid QR format: " + qrData);
             displayMessage("Invalid QR code");
-            delay(2000);
+            delay(1000);  // Reduced from 2000ms
         }
     }
     
@@ -413,7 +417,7 @@ void loop() {
     scanComplete = false;
 }
 
-// COMPLETELY REWRITTEN to properly handle JSON responses
+// COMPLETELY REWRITTEN to properly handle JSON responses and optimized for speed
 bool checkStudentEligibility(String studentID) {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("⚠️ Not connected to WiFi. Cannot check eligibility.");
@@ -427,8 +431,8 @@ bool checkStudentEligibility(String studentID) {
     Serial.println("Student ID: " + studentID);
     Serial.println("JSON data being sent: " + jsonData);
     
-    // Set a timeout for the HTTP request
-    httpClient.setTimeout(10000);  // 10 second timeout
+    // Set a timeout for the HTTP request - REDUCED
+    httpClient.setTimeout(5000);  // 5 second timeout (reduced from 10)
     
     // Begin HTTP request
     httpClient.beginRequest();
@@ -449,36 +453,111 @@ bool checkStudentEligibility(String studentID) {
     
     // Process the response
     if (statusCode >= 200 && statusCode < 300) {
-        // Check if the response contains "isEligible"
-        if (response.indexOf("isEligible") >= 0) {
-            // Check if response contains "true"
-            if (response.indexOf("true") >= 0) {
-                Serial.println("✅ Student is eligible according to API");
-                return true;
-            } else {
-                Serial.println("❌ Student is not eligible according to API");
-                return false;
-            }
-        } 
-        // Fallback check - if the response contains the student ID, assume it's valid
-        else if (response.indexOf(studentID) >= 0) {
+        // Quick check for eligibility without full JSON parsing
+        if (response.indexOf("isEligible") >= 0 && response.indexOf("true") >= 0) {
+            Serial.println("✅ Student is eligible according to API");
+            return true;
+        } else if (response.indexOf(studentID) >= 0) {
             Serial.println("✅ Found student ID in response, assuming eligible");
             return true;
         } else {
-            Serial.println("❌ No eligibility information found in response");
+            Serial.println("❌ Student is not eligible according to API");
             return false;
         }
     } else {
         Serial.println("❌ Failed to check eligibility - HTTP error");
-        // Fallback behavior - if server is down, allow access
-        // Comment out or remove this line if you want to deny access when server is down
-        // return true;  
-        
         return false;  // Default to denying access on error
     }
 }
 
-// Updated function to check all button presses
+bool changeUnlockPassword() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("⚠️ Not connected to WiFi. Cannot change password.");
+        displayMessage("WiFi Not Connected");
+        delay(2000);
+        return false;
+    }
+    
+    // Create JSON data for password change request
+    String jsonData = "{";
+    jsonData += "\"pcNumber\": " + String(pcNumber) + ", ";
+    jsonData += "\"pcLab\": " + String(pcLabNumber) + ", ";
+    jsonData += "\"currentPassword\": \"" + unlockPassword + "\"";
+    jsonData += "}";
+    
+    Serial.println("Requesting password change...");
+    Serial.println("Request data: " + jsonData);
+    displayMessage("Checking new password...");
+    
+    // Set a timeout for the HTTP request
+    httpClient.setTimeout(15000);  // 15 second timeout
+    
+    // Begin HTTP request
+    httpClient.beginRequest();
+    httpClient.post(PASSWORD_API_PATH);
+    httpClient.sendHeader("Content-Type", "application/json");
+    httpClient.sendHeader("Content-Length", jsonData.length());
+    httpClient.beginBody();
+    httpClient.print(jsonData);
+    httpClient.endRequest();
+    
+    // Get response from the server
+    int statusCode = httpClient.responseStatusCode();
+    String response = httpClient.responseBody();
+    
+    Serial.print("Password change - HTTP Status code: ");
+    Serial.println(statusCode);
+    Serial.println("API Response: " + response);
+    
+    // Process the response
+    if (statusCode >= 200 && statusCode < 300) {
+        // Look for new password in response
+        if (response.indexOf("newPassword") >= 0) {
+            // Extract the new password from JSON response
+            int startIndex = response.indexOf("\"newPassword\":\"") + 15;
+            int endIndex = response.indexOf("\"", startIndex);
+            
+            if (startIndex > 14 && endIndex > startIndex) {
+                String newPassword = response.substring(startIndex, endIndex);
+                
+                if (newPassword.length() > 0 && newPassword != unlockPassword) {
+                    unlockPassword = newPassword;  // Update the global password
+                    Serial.println("✅ Password updated successfully to: " + unlockPassword);
+                    
+                    displayMessage("Password Updated!");
+                    delay(2000);
+                    return true;
+                } else {
+                    Serial.println("ℹ️ No password change needed - same password");
+                    displayMessage("Password Unchanged");
+                    delay(2000);
+                    return true;
+                }
+            }
+        }
+        
+        // If no newPassword field, check if response indicates no change needed
+        if (response.indexOf("unchanged") >= 0 || response.indexOf("same") >= 0) {
+            Serial.println("ℹ️ Password unchanged - server indicates no change needed");
+            displayMessage("Password Current");
+            delay(2000);
+            return true;
+        }
+        
+        Serial.println("⚠️ Unexpected response format");
+        displayMessage("Unexpected Response");
+        delay(2000);
+        return false;
+    } else {
+        Serial.println("❌ Failed to get password update");
+        displayMessage("Password Check Failed");
+        delay(2000);
+        return false;
+    }
+}
+
+
+// Updated function to check all button presses - Optimized
 void checkButtons() {
     // Check if enough time has passed since last button press (debouncing)
     if (millis() - lastButtonPressTime < BUTTON_DEBOUNCE_DELAY) {
@@ -490,6 +569,12 @@ void checkButtons() {
     bool rightButtonState = digitalRead(RIGHT_BUTTON) == LOW;
     bool upButtonState = digitalRead(UP_BUTTON) == LOW;
     bool downButtonState = digitalRead(DOWN_BUTTON) == LOW;
+    
+    // Return early if no buttons are pressed
+    if (!leftButtonState && !rightButtonState && !upButtonState && !downButtonState) {
+        leftButtonPressed = rightButtonPressed = upButtonPressed = downButtonPressed = false;
+        return;
+    }
     
     // Check if left button is pressed (to decrease lab number)
     if (leftButtonState && !leftButtonPressed) {
@@ -503,7 +588,7 @@ void checkButtons() {
             
             // Display updated lab configuration
             displayLabConfig();
-            delay(5000);
+            delay(750);  // Reduced from 1500ms
             
             // Return to normal display
             if (locked) {
@@ -514,7 +599,7 @@ void checkButtons() {
         } else {
             // Already at minimum
             displayMessage("Min Lab Number");
-            delay(5000);
+            delay(500);  // Reduced from 1000ms
             
             // Return to normal display
             if (locked) {
@@ -536,7 +621,7 @@ void checkButtons() {
             
             // Display updated lab configuration
             displayLabConfig();
-            delay(5000);
+            delay(750);  // Reduced from 1500ms
             
             // Return to normal display
             if (locked) {
@@ -547,7 +632,7 @@ void checkButtons() {
         } else {
             // Already at maximum
             displayMessage("Max Lab Number");
-            delay(5000);
+            delay(500);  // Reduced from 1000ms
             
             // Return to normal display
             if (locked) {
@@ -569,7 +654,7 @@ void checkButtons() {
             
             // Display updated lab configuration
             displayLabConfig();
-            delay(1500);
+            delay(750);  // Reduced from 1500ms
             
             // Return to normal display
             if (locked) {
@@ -580,7 +665,7 @@ void checkButtons() {
         } else {
             // Already at maximum
             displayMessage("Max PC Number");
-            delay(1000);
+            delay(500);  // Reduced from 1000ms
             
             // Return to normal display
             if (locked) {
@@ -602,7 +687,7 @@ void checkButtons() {
             
             // Display updated lab configuration
             displayLabConfig();
-            delay(1500);
+            delay(750);  // Reduced from 1500ms
             
             // Return to normal display
             if (locked) {
@@ -613,7 +698,7 @@ void checkButtons() {
         } else {
             // Already at minimum
             displayMessage("Min PC Number");
-            delay(1000);
+            delay(500);  // Reduced from 1000ms
             
             // Return to normal display
             if (locked) {
@@ -691,6 +776,7 @@ String getFormattedTime() {
 }
 
 // Modified function to use ISO date format and send the updated PC lab number
+// OPTIMIZED FOR SPEED with reduced timeout and shorter display times
 void sendLogToAPI(String qrData, String timeIn, String timeOut, String date) {
     // Create correctly formatted JSON data to send to the API
     String jsonData = "{";
@@ -706,8 +792,8 @@ void sendLogToAPI(String qrData, String timeIn, String timeOut, String date) {
     Serial.println("Sending data to API endpoint...");
     Serial.println("Data: " + jsonData);
 
-    // Set a timeout for the HTTP request
-    httpClient.setTimeout(10000);  // 10 second timeout
+    // Set a reduced timeout for the HTTP request
+    httpClient.setTimeout(5000);  // 5 second timeout (reduced from 10 seconds)
     
     // Begin HTTP request
     httpClient.beginRequest();
@@ -718,14 +804,18 @@ void sendLogToAPI(String qrData, String timeIn, String timeOut, String date) {
     httpClient.print(jsonData);
     httpClient.endRequest();
 
-    // Get response from the server
+    // Get response from the server - only wait for status code, not full response body
     int statusCode = httpClient.responseStatusCode();
-    String response = httpClient.responseBody();
+    String response = ""; // Skip getting full response body to save time
+    
+    // Only read response body if needed for debugging
+    if (statusCode < 200 || statusCode >= 300) {
+        response = httpClient.responseBody();
+    }
 
     Serial.print("HTTP Status code: ");
     Serial.println(statusCode);
-    Serial.println("API Response: " + response);
-
+    
     // Update LED status based on the response
     if (statusCode >= 200 && statusCode < 300) {
         Serial.println("✅ Data sent successfully!");
@@ -733,7 +823,6 @@ void sendLogToAPI(String qrData, String timeIn, String timeOut, String date) {
         digitalWrite(RED_LED, LOW);
         
         // Display success message with time info on OLED using centered text
-        // FIXED: String concatenation issues by creating temporary strings
         String inTimeDisplay = "IN: " + timeIn;
         String outTimeDisplay = "OUT: " + timeOut;
         
@@ -746,7 +835,7 @@ void sendLogToAPI(String qrData, String timeIn, String timeOut, String date) {
         displayCenteredText(50, outTimeDisplay.c_str());
         u8g2.sendBuffer();
         
-        delay(2000);
+        delay(1000);  // Reduced from 2000ms
         
         // Reset LED state
         if (locked) {
@@ -830,16 +919,21 @@ void connectToWiFi() {
 void unlockPC() {
     Serial.println("Unlocking PC...");
     displayMessage("Unlocking PC...");
+    
+    // First, try to get updated password from server
+    changeUnlockPassword();
+    
     delay(500);
     Keyboard.press(KEY_F1);
     delay(100);
     Keyboard.press(KEY_F1);
     delay(100);
     Keyboard.release(KEY_F1);
-    // ito ang dahilan pag mabilis and delay hindi gagana
     delay(1000);
-    // Type the password
-    Keyboard.print("hannipham");
+    
+    // Use the potentially updated password
+    Serial.println("Using password: " + unlockPassword);
+    Keyboard.print(unlockPassword);  // Now uses the changeable password
     delay(100);
     Keyboard.press(KEY_RETURN);
     delay(100);
