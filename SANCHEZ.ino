@@ -45,7 +45,7 @@ SoftwareSerial qrScanner(RX_PIN, TX_PIN);
 bool isEligible = false;
 
 String unlockPassword = "Dnrs";  // Default password, now changeable
-#define PASSWORD_API_PATH "/admin/change-pc-password"
+#define PASSWORD_API_PATH "/admin/pc-password"
 
 // JSON Document size for parsing API responses
 #define JSON_BUFFER_SIZE 256
@@ -478,21 +478,16 @@ bool changeUnlockPassword() {
         return false;
     }
     
-    // Create JSON data for password change request
-    String jsonData = "{";
-    jsonData += "\"pcNumber\": " + String(pcNumber) + ", ";
-    jsonData += "\"pcLab\": " + String(pcLabNumber) + ", ";
-    jsonData += "\"currentPassword\": \"" + unlockPassword + "\"";
-    jsonData += "}";
+    // Create simple JSON request for password only
+    String jsonData = "{}";  // Empty JSON object since you only want the password
     
     Serial.println("Requesting password change...");
     Serial.println("Request data: " + jsonData);
-    displayMessage("Checking new password...");
     
     // Set a timeout for the HTTP request
-    httpClient.setTimeout(15000);  // 15 second timeout
+    httpClient.setTimeout(5000);  // 15 second timeout
     
-    // Begin HTTP request
+    // Begin HTTP request - POST with empty JSON
     httpClient.beginRequest();
     httpClient.post(PASSWORD_API_PATH);
     httpClient.sendHeader("Content-Type", "application/json");
@@ -511,20 +506,18 @@ bool changeUnlockPassword() {
     
     // Process the response
     if (statusCode >= 200 && statusCode < 300) {
-        // Look for new password in response
-        if (response.indexOf("newPassword") >= 0) {
+        // Look for pcPassword in response
+        if (response.indexOf("pcPassword") >= 0) {
             // Extract the new password from JSON response
-            int startIndex = response.indexOf("\"newPassword\":\"") + 15;
+            int startIndex = response.indexOf("\"pcPassword\":\"") + 14;
             int endIndex = response.indexOf("\"", startIndex);
             
-            if (startIndex > 14 && endIndex > startIndex) {
+            if (startIndex > 13 && endIndex > startIndex) {
                 String newPassword = response.substring(startIndex, endIndex);
                 
                 if (newPassword.length() > 0 && newPassword != unlockPassword) {
                     unlockPassword = newPassword;  // Update the global password
                     Serial.println("✅ Password updated successfully to: " + unlockPassword);
-                    
-                    displayMessage("Password Updated!");
                     delay(2000);
                     return true;
                 } else {
@@ -536,7 +529,7 @@ bool changeUnlockPassword() {
             }
         }
         
-        // If no newPassword field, check if response indicates no change needed
+        // If no pcPassword field, check if response indicates no change needed
         if (response.indexOf("unchanged") >= 0 || response.indexOf("same") >= 0) {
             Serial.println("ℹ️ Password unchanged - server indicates no change needed");
             displayMessage("Password Current");
