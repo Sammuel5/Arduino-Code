@@ -522,7 +522,6 @@ bool changeUnlockPassword() {
                     return true;
                 } else {
                     Serial.println("ℹ️ No password change needed - same password");
-                    displayMessage("Password Unchanged");
                     delay(2000);
                     return true;
                 }
